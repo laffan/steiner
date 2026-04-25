@@ -1,0 +1,63 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f4f5f7;
+  color: #0f0f0f;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed !important;
+}
+
+button:not(:disabled):hover {
+  filter: brightness(0.95);
+}
+
+/* Strip all browser textarea chrome for inline text editing */
+textarea.inline-text-editor,
+textarea.inline-text-editor:focus {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  padding: 0;
+  margin: 0;
+  box-shadow: none;
+  caret-color: auto;
+}
+
+/* Blinking cursor indicator for empty text fields */
+@keyframes blink-cursor {
+  0%, 100% { border-left-color: currentColor; }
+  50% { border-left-color: transparent; }
+}
+textarea.inline-text-editor.empty-cursor {
+  animation: blink-cursor 1s step-end infinite;
+}
+
+/* Scrollbar styling for shelf */
+.shelf-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.shelf-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.shelf-scroll::-webkit-scrollbar-thumb {
+  background: #ddd;
+  border-radius: 2px;
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src-tauri/target/
+
+# Binary assets fetched by `npm run setup:assets` from upstream tauri-drawing.
+public/fonts/*.woff2
+src-tauri/icons/*.png
+src-tauri/icons/*.icns
+src-tauri/icons/*.ico

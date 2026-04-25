@@ -1,0 +1,80 @@
+/* Source Sans Pro (Source Sans 3) - Regular 400 */
+@font-face {
+  font-family: 'Source Sans Pro';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./source-sans-3.woff2') format('woff2');
+}
+
+/* Source Serif Pro (Source Serif 4) - Regular 400 */
+@font-face {
+  font-family: 'Source Serif Pro';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./source-serif-4.woff2') format('woff2');
+}
+
+/* Libre Franklin - Regular 400 */
+@font-face {
+  font-family: 'Libre Franklin';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./libre-franklin.woff2') format('woff2');
+}
+
+/* Libre Baskerville - Regular 400 */
+@font-face {
+  font-family: 'Libre Baskerville';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./libre-baskerville.woff2') format('woff2');
+}
+
+/* Karla - Regular 400 */
+@font-face {
+  font-family: 'Karla';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./karla.woff2') format('woff2');
+}
+
+/* Lora - Regular 400 */
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./lora.woff2') format('woff2');
+}
+
+/* EB Garamond - Regular 400 */
+@font-face {
+  font-family: 'EB Garamond';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./eb-garamond.woff2') format('woff2');
+}
+
+/* Inter - Regular 400 */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./inter.woff2') format('woff2');
+}
+
+/* Fira Code - Regular 400 */
+@font-face {
+  font-family: 'Fira Code';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fira-code.woff2') format('woff2');
+}
