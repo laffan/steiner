@@ -164,6 +164,8 @@ export class NotesCanvas {
         gridOpacity: this.state.gridOpacity,
         isDragging: this.state.isActiveDrag,
         flowchart: this.state.flowchart,
+        flowDropTargetId: this.state.flowDropTargetId,
+        flowHoveredEdgeId: this.state.flowHoveredEdgeId,
       });
       this._rafId = requestAnimationFrame(loop);
     };

@@ -62,6 +62,11 @@ export class DrawingState extends EventTarget {
     getBounds: (s) => getShapeBounds(s),
     isFlowable: (s) => s.type === "text",
   });
+  /** While dragging a single text shape, the id of the shape under the
+   * cursor that would be the drop-connection target (or null). */
+  flowDropTargetId: string | null = null;
+  /** id of an edge whose curve the cursor is hovering over (or null). */
+  flowHoveredEdgeId: string | null = null;
 
   // Appearance
   appearanceMode: AppearanceMode = "light";
@@ -240,6 +245,19 @@ export class DrawingState extends EventTarget {
       this.editingText = null;
       this.notify("editingText");
       return; // commit ends the interaction; next click starts fresh
+    }
+
+    // Click on the X delete-button of a hovered flowchart edge.
+    if (this.flowHoveredEdgeId) {
+      const mid = this.flowchart.getEdgeMidpoint(this.flowHoveredEdgeId, this.shapes);
+      const r = 12 / this.camera.zoom;
+      if (mid && Math.hypot(canvasPt.x - mid.x, canvasPt.y - mid.y) < r) {
+        this.flowchart.removeEdge(this.flowHoveredEdgeId);
+        this.flowHoveredEdgeId = null;
+        this.recordHistory();
+        this.notify("shapes");
+        return;
+      }
     }
 
     const willEditText = this.tool === "text" && !this.brainstormMode;
@@ -446,11 +464,36 @@ export class DrawingState extends EventTarget {
         for (const s of this.shapes) {
           if (this.selectedIds.has(s.id) && s.type === "drag-area") selectedDragAreaIds.add(s.id);
         }
+        // Flowchart descendants of any selected node move with the selection,
+        // preserving the downstream spatial layout.
+        const flowDescendants = new Set<string>();
+        for (const id of this.selectedIds) {
+          for (const d of this.flowchart.descendantsOf(id)) flowDescendants.add(d);
+        }
         this.shapes = this.shapes.map((s) => {
           if (this.selectedIds.has(s.id)) return moveShape(s, dx, dy);
           if (s.parentId && selectedDragAreaIds.has(s.parentId)) return moveShape(s, dx, dy);
+          if (flowDescendants.has(s.id)) return moveShape(s, dx, dy);
           return s;
         });
+        // While dragging a single text shape, keep the hover drop target up
+        // to date so the renderer can outline it.
+        if (this.selectedIds.size === 1) {
+          const draggedId = this.selectedIds.values().next().value as string;
+          const dragged = this.shapes.find((s) => s.id === draggedId);
+          if (dragged && dragged.type === "text") {
+            const b = getShapeBounds(dragged);
+            const center: Point = {
+              x: (b.minX + b.maxX) / 2,
+              y: (b.minY + b.maxY) / 2,
+            };
+            const t = this.flowchart.findDropTarget(center, this.shapes, draggedId);
+            const newId = t ? t.id : null;
+            if (newId !== this.flowDropTargetId) {
+              this.flowDropTargetId = newId;
+            }
+          }
+        }
         this.notify("shapes");
       }
       return;
@@ -477,6 +520,15 @@ export class DrawingState extends EventTarget {
     } else if (this.tool === "drag-area" && this.creatingDragArea) {
       this.creatingDragArea = { ...this.creatingDragArea, end: canvasPt };
       this.notify("creatingDragArea");
+    } else {
+      // Idle hover: track flowchart edge under cursor for the delete button.
+      const threshold = 10 / this.camera.zoom;
+      const edge = this.flowchart.findEdgeNear(canvasPt, this.shapes, threshold);
+      const newId = edge ? edge.id : null;
+      if (newId !== this.flowHoveredEdgeId) {
+        this.flowHoveredEdgeId = newId;
+        this.notify("shapes"); // triggers re-render
+      }
     }
   }
 
@@ -549,10 +601,19 @@ export class DrawingState extends EventTarget {
                   ? { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } }
                   : s,
               );
+              // Snapping the parent also pulls its descendants — replay
+              // their existing offset so the chain stays intact.
+              const desc = this.flowchart.descendantsOf(droppedId);
+              if (desc.size > 0) {
+                this.shapes = this.shapes.map((s) =>
+                  desc.has(s.id) ? moveShape(s, dx, dy) : s,
+                );
+              }
             }
           }
         }
       }
+      this.flowDropTargetId = null;
 
       this.recordHistory();
       this.notify("shapes");

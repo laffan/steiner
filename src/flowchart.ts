@@ -86,7 +86,7 @@ export class FlowchartLayer<S extends FlowNode> {
       gapY: config.gapY ?? 16,
       arrowColor: config.arrowColor ?? "#666",
       arrowWidth: config.arrowWidth ?? 1.5,
-      arrowHeadSize: config.arrowHeadSize ?? 9,
+      arrowHeadSize: config.arrowHeadSize ?? 11,
     };
   }
 
@@ -132,6 +132,59 @@ export class FlowchartLayer<S extends FlowNode> {
   /** Remove every edge that references this node. */
   removeNode(id: string): void {
     this.edges = this.edges.filter((e) => e.from !== id && e.to !== id);
+  }
+
+  /** Remove a single edge by id. No-op if not found. */
+  removeEdge(edgeId: string): void {
+    this.edges = this.edges.filter((e) => e.id !== edgeId);
+  }
+
+  /**
+   * Find the edge whose curve passes within `threshold` units of `point`.
+   * Returns null if none. Threshold is in canvas units — callers should
+   * scale by 1/zoom for a screen-space threshold.
+   */
+  findEdgeNear(
+    point: { x: number; y: number },
+    shapes: S[],
+    threshold: number,
+  ): FlowEdge | null {
+    let best: FlowEdge | null = null;
+    let bestDist = threshold;
+    const byId = new Map<string, S>();
+    for (const s of shapes) byId.set(s.id, s);
+    for (const e of this.edges) {
+      const a = byId.get(e.from);
+      const b = byId.get(e.to);
+      if (!a || !b) continue;
+      const geom = this.geometry(this.cfg.getBounds(a), this.cfg.getBounds(b));
+      // Sample 16 points along the bezier and check each segment.
+      let prev = bezier(geom, 0);
+      for (let i = 1; i <= 16; i++) {
+        const cur = bezier(geom, i / 16);
+        const d = pointToSegment(point, prev, cur);
+        if (d < bestDist) {
+          bestDist = d;
+          best = e;
+        }
+        prev = cur;
+      }
+    }
+    return best;
+  }
+
+  /** Midpoint of the edge's curve (t = 0.5), in canvas coordinates. */
+  getEdgeMidpoint(
+    edgeId: string,
+    shapes: S[],
+  ): { x: number; y: number } | null {
+    const e = this.edges.find((e) => e.id === edgeId);
+    if (!e) return null;
+    const a = shapes.find((s) => s.id === e.from);
+    const b = shapes.find((s) => s.id === e.to);
+    if (!a || !b) return null;
+    const geom = this.geometry(this.cfg.getBounds(a), this.cfg.getBounds(b));
+    return bezier(geom, 0.5);
   }
 
   // --- Drop logic ---
@@ -215,6 +268,33 @@ export class FlowchartLayer<S extends FlowNode> {
 
   // --- Rendering ---
 
+  private geometry(ab: FlowBounds, bb: FlowBounds): EdgeGeometry {
+    // Pick the side of each box closer to the other so the arrow looks sane
+    // even if the user drags the child to the parent's left/below.
+    const childOnRight = (bb.minX + bb.maxX) / 2 >= (ab.minX + ab.maxX) / 2;
+    const sx = childOnRight ? ab.maxX : ab.minX;
+    const sy = (ab.minY + ab.maxY) / 2;
+    const tipX = childOnRight ? bb.minX : bb.maxX;
+    const tipY = (bb.minY + bb.maxY) / 2;
+    const sign = childOnRight ? 1 : -1;
+    // Back the line off by `ah` so it terminates at the BASE of the arrowhead
+    // (rather than the tip). Tangent at t=1 is horizontal by construction.
+    const ah = this.cfg.arrowHeadSize;
+    const ex = tipX - sign * ah;
+    const ey = tipY;
+    const dx = Math.max(40, Math.abs(ex - sx) * 0.5);
+    const cp1x = sx + sign * dx;
+    const cp2x = ex - sign * dx;
+    return {
+      p0: { x: sx, y: sy },
+      cp1: { x: cp1x, y: sy },
+      cp2: { x: cp2x, y: ey },
+      p3: { x: ex, y: ey },
+      tip: { x: tipX, y: tipY },
+      sign,
+    };
+  }
+
   /**
    * Draw all edges as cubic-bezier arrows from the right edge of the parent
    * to the left edge of the child. Call after the camera transform is
@@ -232,50 +312,26 @@ export class FlowchartLayer<S extends FlowNode> {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
+    const ah = this.cfg.arrowHeadSize;
     for (const e of this.edges) {
       const a = byId.get(e.from);
       const b = byId.get(e.to);
       if (!a || !b) continue;
-      const ab = this.cfg.getBounds(a);
-      const bb = this.cfg.getBounds(b);
+      const g = this.geometry(this.cfg.getBounds(a), this.cfg.getBounds(b));
 
-      // Pick the side of each box closer to the other so the arrow looks
-      // sane even if the user drags the child to the parent's left/below.
-      const childOnRight = (bb.minX + bb.maxX) / 2 >= (ab.minX + ab.maxX) / 2;
-      const sx = childOnRight ? ab.maxX : ab.minX;
-      const sy = (ab.minY + ab.maxY) / 2;
-      const tx = childOnRight ? bb.minX : bb.maxX;
-      const ty = (bb.minY + bb.maxY) / 2;
-
-      const dx = Math.max(40, Math.abs(tx - sx) * 0.5);
-      const cp1x = childOnRight ? sx + dx : sx - dx;
-      const cp2x = childOnRight ? tx - dx : tx + dx;
-
+      // Bezier from parent edge to base of arrowhead.
       ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.bezierCurveTo(cp1x, sy, cp2x, ty, tx, ty);
+      ctx.moveTo(g.p0.x, g.p0.y);
+      ctx.bezierCurveTo(g.cp1.x, g.cp1.y, g.cp2.x, g.cp2.y, g.p3.x, g.p3.y);
       ctx.stroke();
 
-      // Arrowhead. Use the tangent at the curve's end (cp2 → end) for direction.
-      const angle = Math.atan2(ty - ty /* dummy */, tx - cp2x); // along x-ish
-      // Better: compute the actual derivative at t=1 of the cubic bezier.
-      // dB/dt at t=1 = 3 * (P3 - P2). Here P2 = (cp2x, ty) and P3 = (tx, ty),
-      // so the tangent is (3*(tx-cp2x), 0) — horizontal. Good enough.
-      const ah = this.cfg.arrowHeadSize;
-      const dirX = Math.cos(angle);
-      const dirY = Math.sin(angle);
-      const px = -dirY;
-      const py = dirX;
+      // Arrowhead — base at p3, tip at .tip.
+      const px = 0;
+      const py = g.sign;
       ctx.beginPath();
-      ctx.moveTo(tx, ty);
-      ctx.lineTo(
-        tx - ah * dirX + (ah * 0.55) * px,
-        ty - ah * dirY + (ah * 0.55) * py,
-      );
-      ctx.lineTo(
-        tx - ah * dirX - (ah * 0.55) * px,
-        ty - ah * dirY - (ah * 0.55) * py,
-      );
+      ctx.moveTo(g.tip.x, g.tip.y);
+      ctx.lineTo(g.p3.x + ah * 0.55 * px, g.p3.y + ah * 0.55 * py);
+      ctx.lineTo(g.p3.x - ah * 0.55 * px, g.p3.y - ah * 0.55 * py);
       ctx.closePath();
       ctx.fill();
     }
@@ -290,4 +346,43 @@ export class FlowchartLayer<S extends FlowNode> {
 
 function genId(): string {
   return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+interface Pt {
+  x: number;
+  y: number;
+}
+
+interface EdgeGeometry {
+  p0: Pt;
+  cp1: Pt;
+  cp2: Pt;
+  /** End of the line — base of the arrowhead. */
+  p3: Pt;
+  /** Tip of the arrowhead — touches the child shape's edge. */
+  tip: Pt;
+  /** +1 if child is to the right of parent, -1 if to the left. */
+  sign: number;
+}
+
+function bezier(g: EdgeGeometry, t: number): Pt {
+  const u = 1 - t;
+  const a = u * u * u;
+  const b = 3 * u * u * t;
+  const c = 3 * u * t * t;
+  const d = t * t * t;
+  return {
+    x: a * g.p0.x + b * g.cp1.x + c * g.cp2.x + d * g.p3.x,
+    y: a * g.p0.y + b * g.cp1.y + c * g.cp2.y + d * g.p3.y,
+  };
+}
+
+function pointToSegment(p: Pt, a: Pt, b: Pt): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-6) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }

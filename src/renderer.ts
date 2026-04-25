@@ -22,6 +22,10 @@ export interface RenderState {
   fontFamily: string;
   isDragging: boolean;
   flowchart?: FlowchartLayer<Shape>;
+  /** id of a shape currently underlined as a flowchart drop target. */
+  flowDropTargetId?: string | null;
+  /** id of a flowchart edge whose curve is hovered (renders an X). */
+  flowHoveredEdgeId?: string | null;
 }
 
 export function render(canvas: HTMLCanvasElement, state: RenderState): void {
@@ -80,6 +84,27 @@ export function render(canvas: HTMLCanvasElement, state: RenderState): void {
     else if (shape.type === "image") drawImageShape(ctx, shape, imageCache, shape.id === state.croppingImageId);
   }
 
+  // Drop-target outline: dashed rectangle around the shape that would be
+  // connected if the user released the drag right now.
+  if (state.flowDropTargetId) {
+    const target = shapes.find((s) => s.id === state.flowDropTargetId);
+    if (target && !pocketedIds.has(target.id)) {
+      const tb = getShapeBounds(target);
+      const pad = 8;
+      ctx.save();
+      ctx.strokeStyle = theme.accent;
+      ctx.lineWidth = 2 / camera.zoom;
+      ctx.setLineDash([8 / camera.zoom, 4 / camera.zoom]);
+      ctx.strokeRect(
+        tb.minX - pad,
+        tb.minY - pad,
+        tb.maxX - tb.minX + pad * 2,
+        tb.maxY - tb.minY + pad * 2,
+      );
+      ctx.restore();
+    }
+  }
+
   if (creatingDragArea) {
     const { start, end } = creatingDragArea;
     const x = Math.min(start.x, end.x);
@@ -131,6 +156,17 @@ export function render(canvas: HTMLCanvasElement, state: RenderState): void {
   }
 
   ctx.restore();
+
+  // Hovered-edge delete button — drawn in screen space so it's a fixed size
+  // regardless of zoom. Click handling lives in state.handlePointerDown.
+  if (state.flowchart && state.flowHoveredEdgeId) {
+    const mid = state.flowchart.getEdgeMidpoint(state.flowHoveredEdgeId, shapes);
+    if (mid) {
+      const sx = mid.x * camera.zoom + camera.x;
+      const sy = mid.y * camera.zoom + camera.y;
+      drawEdgeDeleteButton(ctx, sx, sy, theme);
+    }
+  }
 
   // Draw pocket tray on left edge (always visible when items are pocketed, or during drag)
   const hasPocketed = pocketLayout.entries.length > 0;
@@ -505,5 +541,33 @@ function drawBackground(ctx: CanvasRenderingContext2D, camera: Camera, w: number
       }
     }
   }
+  ctx.restore();
+}
+
+/** A small "×" button at (sx, sy), screen space. */
+function drawEdgeDeleteButton(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  theme: CanvasTheme,
+): void {
+  const r = 9;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fillStyle = theme.uiBackground;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = theme.foreground;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(sx - 3.5, sy - 3.5);
+  ctx.lineTo(sx + 3.5, sy + 3.5);
+  ctx.moveTo(sx + 3.5, sy - 3.5);
+  ctx.lineTo(sx - 3.5, sy + 3.5);
+  ctx.lineWidth = 1.4;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = theme.foreground;
+  ctx.stroke();
   ctx.restore();
 }
