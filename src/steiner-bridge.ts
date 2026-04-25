@@ -54,6 +54,7 @@ export class SteinerBridge {
   async init() {
     await this.restoreState();
     this.installListeners();
+    this.installDivider();
   }
 
   destroy() {
@@ -193,6 +194,74 @@ export class SteinerBridge {
   private cancelPending() {
     this.pending = null;
     this.removeGhost();
+  }
+
+  // Pinned to the canvas webview's left edge — which is the seam between
+  // the two webviews in the parent window. Drag-deltas are forwarded to
+  // Rust, which re-layouts both webviews. Using e.movementX (raw pointer
+  // delta) rather than clientX — avoids the race where the canvas shifts
+  // mid-drag and clientX no longer reflects intent.
+  private installDivider() {
+    const HOT_W = 6; // hover hit-area width
+    const VIS_W = 1; // visible line width (centered in hit-area)
+    const el = document.createElement("div");
+    el.title = "Drag to resize panes";
+    Object.assign(el.style, {
+      position: "fixed",
+      left: "0",
+      top: "0",
+      width: `${HOT_W}px`,
+      height: "100vh",
+      cursor: "ew-resize",
+      zIndex: "10001",
+      background: "transparent",
+    } as Partial<CSSStyleDeclaration>);
+    const line = document.createElement("div");
+    Object.assign(line.style, {
+      position: "absolute",
+      left: `${(HOT_W - VIS_W) / 2}px`,
+      top: "0",
+      width: `${VIS_W}px`,
+      height: "100%",
+      background: "rgba(0,0,0,0.18)",
+      transition: "background 0.15s ease",
+    } as Partial<CSSStyleDeclaration>);
+    el.appendChild(line);
+    el.addEventListener("mouseenter", () => {
+      line.style.background = "rgba(0,0,0,0.4)";
+    });
+    el.addEventListener("mouseleave", () => {
+      line.style.background = "rgba(0,0,0,0.18)";
+    });
+
+    let dragging = false;
+    el.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      dragging = true;
+      el.setPointerCapture(e.pointerId);
+      document.body.style.cursor = "ew-resize";
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      if (e.movementX === 0) return;
+      invoke("nudge_split", { deltaPixels: e.movementX }).catch(() => {});
+    });
+    const endDrag = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {
+        // already released
+      }
+      document.body.style.cursor = "";
+    };
+    el.addEventListener("pointerup", endDrag);
+    el.addEventListener("pointercancel", endDrag);
+
+    document.body.appendChild(el);
+    this.cleanups.push(() => el.remove());
   }
 
   private ensureGhost() {

@@ -67,6 +67,22 @@ fn set_split_fraction(app: AppHandle, fraction: f64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn nudge_split(app: AppHandle, delta_pixels: f64) -> Result<(), String> {
+    let window = app
+        .get_window(WINDOW_LABEL)
+        .ok_or_else(|| "main window not found".to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let logical_w = size.width as f64 / scale;
+    if logical_w <= 0.0 {
+        return Ok(());
+    }
+    let current = current_fraction(&app);
+    let new_fraction = ((current * logical_w) + delta_pixels) / logical_w;
+    set_split_fraction(app, new_fraction)
+}
+
+#[tauri::command]
 fn load_snippets(app: AppHandle) -> Result<Vec<Snippet>, String> {
     let path = snippets_path(&app)?;
     if !path.exists() {
@@ -179,6 +195,7 @@ pub fn run() {
             pin_snippet,
             send_to_claude,
             set_split_fraction,
+            nudge_split,
             load_snippets,
             load_canvas_state,
             save_canvas_state,
@@ -208,12 +225,10 @@ pub fn run() {
                 CLAUDE_LABEL,
                 WebviewUrl::External("https://claude.ai/".parse().unwrap()),
             )
-            .initialization_script(CLAUDE_INIT_SCRIPT)
-            .auto_resize();
+            .initialization_script(CLAUDE_INIT_SCRIPT);
 
             let canvas_webview =
                 WebviewBuilder::new(CANVAS_LABEL, WebviewUrl::App("index.html".into()))
-                    .auto_resize()
                     .disable_drag_drop_handler();
 
             window.add_child(
