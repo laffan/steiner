@@ -153,6 +153,51 @@ fn canvas_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir(app)?.join("canvas.json"))
 }
 
+fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join("session.json"))
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct Session {
+    #[serde(default)]
+    last_claude_url: Option<String>,
+}
+
+fn read_session(app: &AppHandle) -> Session {
+    let Ok(path) = session_path(app) else {
+        return Session::default();
+    };
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Session::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn write_session(app: &AppHandle, session: &Session) -> Result<(), String> {
+    let path = session_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
+    fs::write(&path, raw).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_last_url(app: AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with("https://claude.ai")
+        && !url.starts_with("https://www.claude.ai")
+    {
+        return Ok(());
+    }
+    let mut s = read_session(&app);
+    if s.last_claude_url.as_deref() == Some(url.as_str()) {
+        return Ok(());
+    }
+    s.last_claude_url = Some(url);
+    write_session(&app, &s)
+}
+
 fn layout_webviews(app: &AppHandle, fraction: f64) -> Result<(), String> {
     let window = app
         .get_window(WINDOW_LABEL)
@@ -196,6 +241,7 @@ pub fn run() {
             send_to_claude,
             set_split_fraction,
             nudge_split,
+            set_last_url,
             load_snippets,
             load_canvas_state,
             save_canvas_state,
@@ -212,6 +258,14 @@ pub fn run() {
             let initial_w = 1400.0_f64;
             let initial_h = 900.0_f64;
 
+            let session = read_session(app.handle());
+            let claude_url = session
+                .last_claude_url
+                .as_deref()
+                .filter(|u| u.starts_with("https://claude.ai") || u.starts_with("https://www.claude.ai"))
+                .unwrap_or("https://claude.ai/")
+                .to_string();
+
             let window = tauri::window::WindowBuilder::new(app, WINDOW_LABEL)
                 .title("Steiner — AI Brainstorm")
                 .inner_size(initial_w, initial_h)
@@ -221,11 +275,19 @@ pub fn run() {
 
             let half = (initial_w / 2.0).round();
 
+            let app_for_nav = app.handle().clone();
             let claude_webview = WebviewBuilder::new(
                 CLAUDE_LABEL,
-                WebviewUrl::External("https://claude.ai/".parse().unwrap()),
+                WebviewUrl::External(claude_url.parse().unwrap()),
             )
-            .initialization_script(CLAUDE_INIT_SCRIPT);
+            .initialization_script(CLAUDE_INIT_SCRIPT)
+            .on_navigation(move |url| {
+                let s = url.to_string();
+                if s.starts_with("https://claude.ai") || s.starts_with("https://www.claude.ai") {
+                    let _ = set_last_url(app_for_nav.clone(), s);
+                }
+                true
+            });
 
             let canvas_webview =
                 WebviewBuilder::new(CANVAS_LABEL, WebviewUrl::App("index.html".into()))

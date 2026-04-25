@@ -52,13 +52,102 @@
     );
   }
 
+  // Convert a DOM node's children to markdown. Handles the formatting the
+  // canvas renderer understands (headings, bold, italic, links) plus a few
+  // helpers (lists, code, blockquote, line breaks) that degrade gracefully.
+  function htmlToMarkdown(root) {
+    function walk(node, ctx) {
+      if (node.nodeType === 3) {
+        // Collapse runs of whitespace inside text nodes — preserves spacing
+        // without dragging in all of claude.ai's pretty-printed indentation.
+        return (node.textContent || "").replace(/\s+/g, " ");
+      }
+      if (node.nodeType !== 1) return "";
+      var tag = node.tagName.toLowerCase();
+      var inner = "";
+      for (var i = 0; i < node.childNodes.length; i++) {
+        inner += walk(node.childNodes[i], ctx);
+      }
+      switch (tag) {
+        case "h1": return "\n\n# " + inner.trim() + "\n\n";
+        case "h2": return "\n\n## " + inner.trim() + "\n\n";
+        case "h3": return "\n\n### " + inner.trim() + "\n\n";
+        case "h4":
+        case "h5":
+        case "h6": return "\n\n#### " + inner.trim() + "\n\n";
+        case "strong":
+        case "b": return inner.trim() ? "**" + inner.trim() + "**" : "";
+        case "em":
+        case "i": return inner.trim() ? "*" + inner.trim() + "*" : "";
+        case "a": {
+          var href = node.getAttribute("href") || "";
+          var label = inner.trim() || href;
+          if (!href) return label;
+          return "[" + label + "](" + href + ")";
+        }
+        case "code": {
+          var parent = node.parentElement;
+          if (parent && parent.tagName.toLowerCase() === "pre") return inner;
+          return "`" + inner + "`";
+        }
+        case "pre": return "\n\n```\n" + inner.replace(/\n+$/, "") + "\n```\n\n";
+        case "br": return "\n";
+        case "hr": return "\n\n---\n\n";
+        case "p":
+        case "div": return inner + "\n\n";
+        case "ul":
+        case "ol": return "\n" + inner + "\n";
+        case "li": {
+          var p = node.parentElement;
+          var marker = "- ";
+          if (p && p.tagName.toLowerCase() === "ol") {
+            var idx =
+              Array.prototype.indexOf.call(p.children, node) + 1;
+            marker = idx + ". ";
+          }
+          return marker + inner.trim() + "\n";
+        }
+        case "blockquote":
+          return (
+            inner
+              .trim()
+              .split("\n")
+              .map(function (l) {
+                return "> " + l;
+              })
+              .join("\n") + "\n\n"
+          );
+        default: return inner;
+      }
+    }
+    var out = "";
+    for (var i = 0; i < root.childNodes.length; i++) {
+      out += walk(root.childNodes[i], {});
+    }
+    // Tidy: collapse 3+ newlines to 2, trim ends.
+    return out.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  function selectionToMarkdown(sel) {
+    try {
+      var range = sel.getRangeAt(0);
+      var frag = range.cloneContents();
+      var wrap = document.createElement("div");
+      wrap.appendChild(frag);
+      var md = htmlToMarkdown(wrap);
+      return md || sel.toString().trim();
+    } catch (e) {
+      return sel.toString().trim();
+    }
+  }
+
   window.__steinerCapturePin = function () {
     var sel = window.getSelection();
     if (!sel || sel.isCollapsed) {
       flashToast("No text selected — highlight text first, then press ⌘⇧P");
       return;
     }
-    var text = sel.toString().trim();
+    var text = selectionToMarkdown(sel);
     if (!text) {
       flashToast("Selection is empty");
       return;
@@ -82,6 +171,24 @@
         flashToast("Pin failed: " + (err && err.message ? err.message : err));
       });
   };
+
+  // Persist the current chat URL so we restore it on next launch.
+  // claude.ai is a SPA — pushState/replaceState don't fire navigation events
+  // on the WebView, so we wrap them and listen for popstate too.
+  function reportUrl() {
+    invoke("set_last_url", { url: window.location.href }).catch(function () {});
+  }
+  reportUrl();
+  ["pushState", "replaceState"].forEach(function (m) {
+    var orig = history[m];
+    history[m] = function () {
+      var ret = orig.apply(this, arguments);
+      reportUrl();
+      return ret;
+    };
+  });
+  window.addEventListener("popstate", reportUrl);
+  window.addEventListener("hashchange", reportUrl);
 
   // Resilient query for the prompt input. Tries contenteditable first
   // (current claude.ai), then textarea, then any input-like role.
