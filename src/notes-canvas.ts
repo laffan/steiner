@@ -163,6 +163,7 @@ export class NotesCanvas {
         gridSpacing: this.state.gridSpacing,
         gridOpacity: this.state.gridOpacity,
         isDragging: this.state.isActiveDrag,
+        flowchart: this.state.flowchart,
       });
       this._rafId = requestAnimationFrame(loop);
     };

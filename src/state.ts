@@ -17,6 +17,7 @@ import {
   applyResize, applyCropResize, openExternalUrl,
 } from "./state-helpers";
 import { computePocketLayout, POCKET_ZONE_WIDTH } from "./utils";
+import { FlowchartLayer } from "./flowchart";
 
 export interface EditingText {
   shapeId: string | null;
@@ -54,6 +55,13 @@ export class DrawingState extends EventTarget {
   isPanning = false;
   /** Shape ID currently being cropped, or null */
   croppingImageId: string | null = null;
+
+  /** Flowchart edges between text shapes. Drop a text shape onto another
+   * text shape to connect them; arrows render in the canvas. */
+  flowchart = new FlowchartLayer<Shape>({
+    getBounds: (s) => getShapeBounds(s),
+    isFlowable: (s) => s.type === "text",
+  });
 
   // Appearance
   appearanceMode: AppearanceMode = "light";
@@ -518,6 +526,34 @@ export class DrawingState extends EventTarget {
         if (newParent !== s.parentId) return { ...s, parentId: newParent };
         return s;
       });
+
+      // Flowchart drop: a single text shape dropped on top of another text shape
+      // becomes its child (or sibling, if the target already has children).
+      if (this.selectedIds.size === 1) {
+        const droppedId = this.selectedIds.values().next().value as string;
+        const dropped = this.shapes.find((s) => s.id === droppedId);
+        if (dropped && dropped.type === "text") {
+          const oldBounds = getShapeBounds(dropped);
+          const center: Point = {
+            x: (oldBounds.minX + oldBounds.maxX) / 2,
+            y: (oldBounds.minY + oldBounds.maxY) / 2,
+          };
+          const target = this.flowchart.findDropTarget(center, this.shapes, droppedId);
+          if (target) {
+            const newTL = this.flowchart.tryConnect(droppedId, target.id, this.shapes);
+            if (newTL) {
+              const dx = newTL.minX - oldBounds.minX;
+              const dy = newTL.minY - oldBounds.minY;
+              this.shapes = this.shapes.map((s) =>
+                s.id === droppedId && s.type === "text"
+                  ? { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } }
+                  : s,
+              );
+            }
+          }
+        }
+      }
+
       this.recordHistory();
       this.notify("shapes");
       return;
@@ -613,6 +649,7 @@ export class DrawingState extends EventTarget {
     this.shapes = this.shapes
       .filter((s) => !deletingIds.has(s.id))
       .map((s) => s.parentId && deletingIds.has(s.parentId) ? { ...s, parentId: undefined } : s);
+    for (const id of deletingIds) this.flowchart.removeNode(id);
     this.selectedIds = new Set();
     this.recordHistory();
     this.notify("shapes");

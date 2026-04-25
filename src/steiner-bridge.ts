@@ -13,6 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { NotesCanvas } from "./notes-canvas";
 import type { Shape, TextShape } from "./types";
 import { screenToCanvas } from "./utils";
+import type { FlowEdge } from "./flowchart";
 
 export interface PinnedSnippet {
   id: string;
@@ -33,6 +34,7 @@ export interface SnippetMeta {
 interface PersistedState {
   shapes: Shape[];
   snippetMeta: Record<string, SnippetMeta>;
+  flowEdges?: FlowEdge[];
 }
 
 const SAVE_DEBOUNCE_MS = 400;
@@ -102,6 +104,7 @@ export class SteinerBridge {
           this.snippetMeta.set(id, meta as SnippetMeta);
         }
       }
+      this.canvas.state.flowchart.deserialize(state.flowEdges);
     } catch (err) {
       console.warn("[steiner] restore failed", err);
     }
@@ -320,6 +323,7 @@ export class SteinerBridge {
     const payload: PersistedState = {
       shapes,
       snippetMeta: Object.fromEntries(this.snippetMeta),
+      flowEdges: this.canvas.state.flowchart.serialize(),
     };
     try {
       await invoke("save_canvas_state", { state: payload });

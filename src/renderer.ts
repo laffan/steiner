@@ -4,6 +4,7 @@ import type { CanvasTheme } from "./themes";
 import { computePocketLayout, getShapeBounds, POCKET_ZONE_WIDTH, POCKET_TRAY_WIDTH } from "./utils";
 import type { PocketEntry } from "./utils";
 import { parseText } from "./markdown";
+import type { FlowchartLayer } from "./flowchart";
 
 export interface RenderState {
   shapes: Shape[];
@@ -20,6 +21,7 @@ export interface RenderState {
   gridOpacity: number;
   fontFamily: string;
   isDragging: boolean;
+  flowchart?: FlowchartLayer<Shape>;
 }
 
 export function render(canvas: HTMLCanvasElement, state: RenderState): void {
@@ -59,6 +61,14 @@ export function render(canvas: HTMLCanvasElement, state: RenderState): void {
     if (shape.type === "drag-area") {
       if (!pocketedIds.has(shape.id)) drawDragArea(ctx, shape);
     }
+  }
+
+  // Flowchart arrows render under text shapes so the connectors visually
+  // emerge from behind the boxes.
+  if (state.flowchart) {
+    state.flowchart.setArrowColor(theme.foreground);
+    const visibleShapes = shapes.filter((s) => !pocketedIds.has(s.id));
+    state.flowchart.draw(ctx, visibleShapes);
   }
 
   for (const shape of shapes) {
