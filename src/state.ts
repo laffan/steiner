@@ -67,6 +67,11 @@ export class DrawingState extends EventTarget {
   flowDropTargetId: string | null = null;
   /** id of an edge whose curve the cursor is hovering over (or null). */
   flowHoveredEdgeId: string | null = null;
+  /** Set by startEditingFlowchartChild before a new shape exists; consumed
+   * by commitText to wire the edge once the shape is created. */
+  private _pendingFlowParent: string | null = null;
+  /** History of recently-edited text-shape ids, oldest first. */
+  private _recentEditIds: string[] = [];
 
   // Appearance
   appearanceMode: AppearanceMode = "light";
@@ -158,9 +163,12 @@ export class DrawingState extends EventTarget {
   }
 
   // === Text ===
-  commitText(editing: EditingText) {
+  commitText(editing: EditingText): string | null {
     const trimmed = editing.text.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      this._pendingFlowParent = null;
+      return null;
+    }
     let shapeId: string;
     if (editing.shapeId) {
       shapeId = editing.shapeId;
@@ -181,13 +189,21 @@ export class DrawingState extends EventTarget {
         text: trimmed, fontSize: editing.fontSize, color: editing.color,
         width: fitWidth,
       } as TextShape];
+      // Pending flowchart parent (set by startEditingFlowchartChild before
+      // user typed) — wire the edge once the new shape exists.
+      if (this._pendingFlowParent) {
+        this.flowchart.addEdge(this._pendingFlowParent, shapeId);
+        this._pendingFlowParent = null;
+      }
     }
+    this.recordRecentEdit(shapeId);
     this.selectedIds = new Set([shapeId]);
     this.tool = "select";
     this.recordHistory();
     this.notify("shapes");
     this.notify("selectedIds");
     this.notify("tool");
+    return shapeId;
   }
 
   startEditingExistingText(shape: TextShape) {
@@ -197,7 +213,89 @@ export class DrawingState extends EventTarget {
       // Widen to at least 350 for comfortable editing, unless manually set wider
       width: shape.manualWidth ? shape.width : Math.max(350, shape.width || 0),
     };
+    this.recordRecentEdit(shape.id);
     this.notify("editingText");
+  }
+
+  // === Flowchart-aware editing shortcuts ===
+
+  /** Open an editor for a brand-new node positioned as a flowchart child of
+   * `parentId`. The edge is added by commitText once the user types something. */
+  startEditingFlowchartChild(parentId: string) {
+    const parent = this.shapes.find((s) => s.id === parentId);
+    if (!parent || parent.type !== "text") return;
+    const pBounds = getShapeBounds(parent);
+    let baseY = pBounds.minY;
+    for (const cid of this.flowchart.childrenOf(parentId)) {
+      const c = this.shapes.find((s) => s.id === cid);
+      if (!c) continue;
+      const cb = getShapeBounds(c);
+      if (cb.maxY + 16 > baseY) baseY = cb.maxY + 16;
+    }
+    const newPos: Point = { x: pBounds.maxX + 60, y: baseY };
+    this._pendingFlowParent = parentId;
+    this.editingText = {
+      shapeId: null,
+      position: newPos,
+      text: "",
+      fontSize: parent.fontSize,
+      color: parent.color,
+      width: 350,
+    };
+    this.notify("editingText");
+  }
+
+  /** Open an editor for a sibling of `currentId` — child of the same parent
+   * if one exists; otherwise just a new node directly below current. */
+  startEditingFlowchartSibling(currentId: string) {
+    const parentId = this.flowchart.parentOf(currentId);
+    if (parentId) {
+      this.startEditingFlowchartChild(parentId);
+      return;
+    }
+    const cur = this.shapes.find((s) => s.id === currentId);
+    if (!cur || cur.type !== "text") return;
+    const cb = getShapeBounds(cur);
+    this.editingText = {
+      shapeId: null,
+      position: { x: cur.position.x, y: cb.maxY + 16 },
+      text: "",
+      fontSize: cur.fontSize,
+      color: cur.color,
+      width: cur.width ?? 350,
+    };
+    this.notify("editingText");
+  }
+
+  /** Enter edit mode on the flowchart parent of `currentId`, if any. */
+  startEditingFlowchartParent(currentId: string): boolean {
+    const parentId = this.flowchart.parentOf(currentId);
+    if (!parentId) return false;
+    const parent = this.shapes.find((s) => s.id === parentId);
+    if (!parent || parent.type !== "text") return false;
+    this.startEditingExistingText(parent);
+    return true;
+  }
+
+  /** Enter edit mode on the most-recently-edited text shape (excluding
+   * `excludeId` and the just-edited shape if same). */
+  startEditingMostRecent(excludeId?: string): boolean {
+    for (let i = this._recentEditIds.length - 1; i >= 0; i--) {
+      const id = this._recentEditIds[i];
+      if (id === excludeId) continue;
+      const shape = this.shapes.find((s) => s.id === id);
+      if (shape && shape.type === "text") {
+        this.startEditingExistingText(shape);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  recordRecentEdit(shapeId: string) {
+    this._recentEditIds = this._recentEditIds.filter((x) => x !== shapeId);
+    this._recentEditIds.push(shapeId);
+    if (this._recentEditIds.length > 50) this._recentEditIds.shift();
   }
 
   // === Resize handle hit test ===

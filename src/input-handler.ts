@@ -4,6 +4,7 @@ import {
   fileToDataUrl, getImageDimensions, isImageFile, isTextFile,
 } from "./external-content";
 import { screenToCanvas } from "./utils";
+import { htmlStringToMarkdown } from "./html-to-markdown";
 
 export interface InputOptions {
   onShelfDrop?: (index: number, x: number, y: number) => void;
@@ -202,6 +203,22 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     }
     if (handledFile) return;
 
+    // Prefer HTML so that selections dragged from claude.ai (or any rich
+    // source) keep their formatting via markdown conversion.
+    const html = (() => {
+      try {
+        return e.dataTransfer.getData("text/html");
+      } catch {
+        return "";
+      }
+    })();
+    if (html && html.trim()) {
+      const md = htmlStringToMarkdown(html);
+      if (md) {
+        state.addTextShapeAtPosition(md, dropPos);
+        return;
+      }
+    }
     const text = await extractDroppedText(e.dataTransfer);
     if (text && text.trim()) state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos);
   }) as unknown as (e: HTMLElementEventMap["drop"]) => void, { capture: true });

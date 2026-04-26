@@ -134,6 +134,15 @@ export class FlowchartLayer<S extends FlowNode> {
     this.edges = this.edges.filter((e) => e.from !== id && e.to !== id);
   }
 
+  /** Add an edge from `from` to `to`. Replaces any existing parent for `to`.
+   * Caller is responsible for cycle prevention if needed. */
+  addEdge(from: string, to: string): FlowEdge {
+    this.edges = this.edges.filter((e) => e.to !== to);
+    const edge: FlowEdge = { id: genId(), from, to };
+    this.edges.push(edge);
+    return edge;
+  }
+
   /** Remove a single edge by id. No-op if not found. */
   removeEdge(edgeId: string): void {
     this.edges = this.edges.filter((e) => e.id !== edgeId);
@@ -274,11 +283,14 @@ export class FlowchartLayer<S extends FlowNode> {
     const childOnRight = (bb.minX + bb.maxX) / 2 >= (ab.minX + ab.maxX) / 2;
     const sx = childOnRight ? ab.maxX : ab.minX;
     const sy = (ab.minY + ab.maxY) / 2;
-    const tipX = childOnRight ? bb.minX : bb.maxX;
-    const tipY = (bb.minY + bb.maxY) / 2;
     const sign = childOnRight ? 1 : -1;
-    // Back the line off by `ah` so it terminates at the BASE of the arrowhead
-    // (rather than the tip). Tangent at t=1 is horizontal by construction.
+    // Visual breathing room: tip stops 10px shy of the child's edge.
+    const TIP_GAP = 10;
+    const tipX = childOnRight ? bb.minX - TIP_GAP : bb.maxX + TIP_GAP;
+    const tipY = (bb.minY + bb.maxY) / 2;
+    // Back the line off by `ah` more so it terminates at the BASE of the
+    // arrowhead (rather than the tip). Tangent at t=1 is horizontal by
+    // construction.
     const ah = this.cfg.arrowHeadSize;
     const ex = tipX - sign * ah;
     const ey = tipY;

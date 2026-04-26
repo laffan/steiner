@@ -28,18 +28,60 @@ export function createTextEditor(state: DrawingState): HTMLElement {
     state.notify("editingText");
   });
 
-  // In brainstorm mode, Enter commits text (Shift+Enter for newline)
+  // In brainstorm mode, Enter commits text (Shift+Enter for newline).
+  // Cmd/Ctrl+Arrow shortcuts navigate the flowchart while editing:
+  //   ⌘→  commit and edit a new child
+  //   ⌘↓  commit and edit a new sibling (or new node below if no parent)
+  //   ⌘↑  commit and jump back to the most recently edited node
+  //   ⌘←  commit and edit the flowchart parent
   textarea.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && state.brainstormMode && state.editingText) {
+    if (!state.editingText) return;
+    if (e.key === "Enter" && !e.shiftKey && state.brainstormMode) {
       e.preventDefault();
       state.commitText(state.editingText);
       state.editingText = null;
       state.notify("editingText");
+      return;
+    }
+    if (!(e.metaKey || e.ctrlKey)) return;
+    const key = e.key;
+    if (
+      key !== "ArrowRight" &&
+      key !== "ArrowDown" &&
+      key !== "ArrowUp" &&
+      key !== "ArrowLeft"
+    ) return;
+    const editing = state.editingText;
+    const hasText = editing.text.trim().length > 0;
+    const wouldHaveCurrent = editing.shapeId || hasText;
+    // ArrowUp (jump to most-recent) can work even from an empty new edit.
+    // The others need a current context — otherwise let the default textarea
+    // behavior (cursor navigation) happen.
+    if (key !== "ArrowUp" && !wouldHaveCurrent) return;
+    e.preventDefault();
+    let currentId: string | null = editing.shapeId;
+    if (hasText) {
+      const committed = state.commitText(editing);
+      if (committed) currentId = committed;
+    }
+    state.editingText = null;
+    state.notify("editingText");
+    if (key === "ArrowRight" && currentId) {
+      state.startEditingFlowchartChild(currentId);
+    } else if (key === "ArrowDown" && currentId) {
+      state.startEditingFlowchartSibling(currentId);
+    } else if (key === "ArrowUp") {
+      state.startEditingMostRecent(currentId ?? undefined);
+    } else if (key === "ArrowLeft" && currentId) {
+      state.startEditingFlowchartParent(currentId);
     }
   });
 
   textarea.addEventListener("blur", () => {
     setTimeout(() => {
+      // If focus came back (e.g. the shortcut handlers re-focused this same
+      // textarea on a new editing context), don't auto-commit.
+      if (document.activeElement === textarea) return;
       if (!state.editingText) return;
       state.commitText(state.editingText);
       state.editingText = null;
