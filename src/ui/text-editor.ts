@@ -3,6 +3,57 @@ import { FONT_FAMILY, LINE_HEIGHT_RATIO } from "../types";
 import { canvasToScreen } from "../utils";
 import { h } from "./dom-helpers";
 
+function toggleWrap(textarea: HTMLTextAreaElement, marker: string, state: DrawingState) {
+  const start = textarea.selectionStart ?? 0;
+  const end = textarea.selectionEnd ?? 0;
+  const value = textarea.value;
+  const ml = marker.length;
+
+  let newValue: string;
+  let newStart: number;
+  let newEnd: number;
+
+  // Empty selection → insert paired markers, place caret between them.
+  if (start === end) {
+    newValue = value.slice(0, start) + marker + marker + value.slice(end);
+    newStart = newEnd = start + ml;
+  } else {
+    const inner = value.slice(start, end);
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    // If the selection itself is already wrapped (e.g. "**foo**"), unwrap.
+    if (inner.startsWith(marker) && inner.endsWith(marker) && inner.length >= ml * 2) {
+      const unwrapped = inner.slice(ml, inner.length - ml);
+      newValue = before + unwrapped + after;
+      newStart = start;
+      newEnd = start + unwrapped.length;
+    }
+    // If the markers sit just outside the selection ("**foo**" with "foo"
+    // selected), remove them.
+    else if (
+      before.endsWith(marker) &&
+      after.startsWith(marker)
+    ) {
+      newValue = before.slice(0, before.length - ml) + inner + after.slice(ml);
+      newStart = start - ml;
+      newEnd = end - ml;
+    } else {
+      // Otherwise, wrap.
+      newValue = before + marker + inner + marker + after;
+      newStart = start + ml;
+      newEnd = end + ml;
+    }
+  }
+
+  textarea.value = newValue;
+  textarea.setSelectionRange(newStart, newEnd);
+  // Keep state in sync the same way the input listener does.
+  if (state.editingText) {
+    state.editingText = { ...state.editingText, text: newValue };
+    state.notify("editingText");
+  }
+}
+
 export function createTextEditor(state: DrawingState): HTMLElement {
   const container = h("div", { style: { position: "absolute", top: "0", left: "0", width: "0", height: "0", overflow: "visible", zIndex: "200", pointerEvents: "none" } });
 
@@ -44,6 +95,18 @@ export function createTextEditor(state: DrawingState): HTMLElement {
       return;
     }
     if (!(e.metaKey || e.ctrlKey)) return;
+
+    // Markdown wrapping shortcuts: Cmd/Ctrl+B (bold), +I (italic),
+    // +Shift+H (highlight). Toggle the markers around the current selection,
+    // or insert paired markers at the cursor with the caret between them.
+    const k = e.key.toLowerCase();
+    if (k === "b" || k === "i" || (k === "h" && e.shiftKey)) {
+      e.preventDefault();
+      const marker = k === "b" ? "**" : k === "i" ? "*" : "==";
+      toggleWrap(textarea, marker, state);
+      return;
+    }
+
     const key = e.key;
     if (
       key !== "ArrowRight" &&

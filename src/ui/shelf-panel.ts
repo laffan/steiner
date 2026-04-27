@@ -10,6 +10,23 @@ interface ShelfNode {
   pocketed: boolean;
 }
 
+const SHELF_WIDTH_KEY = "steiner.shelfWidth";
+const SHELF_MIN_WIDTH = 220;
+const SHELF_MAX_WIDTH = 640;
+const SHELF_DEFAULT_WIDTH = 280;
+
+function readSavedShelfWidth(): number {
+  try {
+    const raw = localStorage.getItem(SHELF_WIDTH_KEY);
+    if (!raw) return SHELF_DEFAULT_WIDTH;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n)) return SHELF_DEFAULT_WIDTH;
+    return Math.max(SHELF_MIN_WIDTH, Math.min(SHELF_MAX_WIDTH, n));
+  } catch {
+    return SHELF_DEFAULT_WIDTH;
+  }
+}
+
 export function createShelfPanel(
   state: DrawingState,
   opts: { shelfItems: string[]; onRemoveShelfItem: (i: number) => void; onRestoreShelfItem: (i: number) => void },
@@ -17,6 +34,7 @@ export function createShelfPanel(
   let isOpen = false;
   let search = "";
   let activeTag: string | null = null;
+  let openWidth = readSavedShelfWidth();
   const collapsed = new Set<string>();
   const pinned = new Set<string>();
 
@@ -36,6 +54,50 @@ export function createShelfPanel(
   });
   panel.appendChild(content);
 
+  // Resize handle on the panel's left edge (the side facing the canvas).
+  // 8px wide hit area, 1px visible bar centered.
+  const resizer = h("div", {
+    style: {
+      position: "absolute",
+      left: "24px",
+      top: "0",
+      width: "8px",
+      height: "100%",
+      cursor: "ew-resize",
+      zIndex: "20",
+      background: "transparent",
+      display: "none",
+    },
+    title: "Drag to resize shelf",
+  });
+  let resizeDrag: { startX: number; startW: number } | null = null;
+  resizer.addEventListener("pointerdown", (e: PointerEvent) => {
+    if (e.button !== 0 || !isOpen) return;
+    e.preventDefault();
+    resizeDrag = { startX: e.clientX, startW: openWidth };
+    resizer.setPointerCapture(e.pointerId);
+    document.body.style.cursor = "ew-resize";
+  });
+  resizer.addEventListener("pointermove", (e: PointerEvent) => {
+    if (!resizeDrag) return;
+    // Panel docks on the right; dragging LEFT widens it.
+    const dx = e.clientX - resizeDrag.startX;
+    const next = Math.max(SHELF_MIN_WIDTH, Math.min(SHELF_MAX_WIDTH, resizeDrag.startW - dx));
+    openWidth = next;
+    panel.style.width = `${next}px`;
+    panel.style.minWidth = `${next}px`;
+  });
+  const endResize = (e: PointerEvent) => {
+    if (!resizeDrag) return;
+    resizeDrag = null;
+    try { resizer.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    document.body.style.cursor = "";
+    try { localStorage.setItem(SHELF_WIDTH_KEY, String(openWidth)); } catch { /* storage disabled */ }
+  };
+  resizer.addEventListener("pointerup", endResize);
+  resizer.addEventListener("pointercancel", endResize);
+  panel.appendChild(resizer);
+
   function t() { return state.theme; }
 
   function applyTheme() {
@@ -50,39 +112,101 @@ export function createShelfPanel(
 
   function buildNodes(shapes: Shape[]): ShelfNode[] {
     const result: ShelfNode[] = [];
-    const dragAreas = shapes.filter((s) => s.type === "drag-area");
-    const others = shapes.filter((s) => s.type === "text" || s.type === "image");
+    const byId = new Map(shapes.map((s) => [s.id, s]));
+    const visited = new Set<string>();
 
-    for (const da of dragAreas) {
-      const children = shapes.filter((s) => s.parentId === da.id);
-      const textChildren = children.filter((s) => s.type === "text");
-      let name = `(${children.length} items)`;
-      if (textChildren.length > 0) {
-        const sorted = [...textChildren].sort((a, b) => { const ab = getShapeBounds(a); const bb = getShapeBounds(b); return ab.minY - bb.minY || ab.minX - bb.minX; });
-        if (sorted[0].type === "text") { const tx = sorted[0].text.substring(0, 40); name = `${tx}${sorted[0].text.length > 40 ? "..." : ""}`; }
+    // Flowchart adjacency: child -> parent and parent -> children.
+    const flowParent = new Map<string, string>();
+    const flowChildren = new Map<string, string[]>();
+    for (const e of state.flowchart.edges) {
+      flowParent.set(e.to, e.from);
+      const list = flowChildren.get(e.from);
+      if (list) list.push(e.to);
+      else flowChildren.set(e.from, [e.to]);
+    }
+
+    const byPos = (a: Shape, b: Shape) => {
+      const ab = getShapeBounds(a);
+      const bb = getShapeBounds(b);
+      return ab.minY - bb.minY || ab.minX - bb.minX;
+    };
+
+    function pushNode(shape: Shape, depth: number, parentId: string | undefined) {
+      if (shape.type === "text") {
+        if (!shape.text.trim()) return;
+        result.push({
+          id: shape.id, type: "text",
+          label: shape.text.substring(0, 50) + (shape.text.length > 50 ? "..." : ""),
+          excerpt: shape.text,
+          color: shape.backgroundColor || null,
+          shapeId: shape.id, parentId, depth,
+          pocketed: !!shape.pocketed,
+        });
+      } else if (shape.type === "image") {
+        result.push({
+          id: shape.id, type: "image",
+          label: shape.name || "Image",
+          excerpt: "", color: null,
+          shapeId: shape.id, parentId, depth,
+          pocketed: !!shape.pocketed,
+        });
       }
-      result.push({ id: da.id, type: "drag-area", label: name, excerpt: "", color: da.type === "drag-area" ? da.strokeColor : null, shapeId: da.id, parentId: undefined, depth: 0, pocketed: !!da.pocketed });
-      if (!collapsed.has(da.id)) {
-        const sortedChildren = [...children].sort((a, b) => { const ab = getShapeBounds(a); const bb = getShapeBounds(b); return ab.minY - bb.minY || ab.minX - bb.minX; });
-        for (const child of sortedChildren) {
-          if (child.type === "text") {
-            result.push({ id: child.id, type: "text", label: child.text.substring(0, 50) + (child.text.length > 50 ? "..." : ""), excerpt: child.text, color: child.backgroundColor || null, shapeId: child.id, parentId: da.id, depth: 1, pocketed: !!child.pocketed });
-          } else if (child.type === "image") {
-            result.push({ id: child.id, type: "image", label: child.name || "Image", excerpt: "", color: null, shapeId: child.id, parentId: da.id, depth: 1, pocketed: !!child.pocketed });
-          }
+    }
+
+    function visit(shape: Shape, depth: number, parentId: string | undefined) {
+      if (visited.has(shape.id)) return;
+      visited.add(shape.id);
+      pushNode(shape, depth, parentId);
+      const childIds = flowChildren.get(shape.id);
+      if (!childIds || childIds.length === 0) return;
+      const children = childIds
+        .map((cid) => byId.get(cid))
+        .filter((c): c is Shape => !!c && (c.type === "text" || c.type === "image"))
+        .sort(byPos);
+      for (const c of children) visit(c, depth + 1, shape.id);
+    }
+
+    // Drag-area folders (containers) come first, with their direct members.
+    // Members that have a flowchart parent are skipped here — they'll be
+    // rendered under their flowchart parent instead.
+    const dragAreas = shapes.filter((s) => s.type === "drag-area");
+    for (const da of dragAreas) {
+      const allChildren = shapes.filter((s) => s.parentId === da.id);
+      const textChildren = allChildren.filter((s) => s.type === "text");
+      let name = `(${allChildren.length} items)`;
+      if (textChildren.length > 0) {
+        const sorted = [...textChildren].sort(byPos);
+        const first = sorted[0];
+        if (first.type === "text") {
+          const tx = first.text.substring(0, 40);
+          name = `${tx}${first.text.length > 40 ? "..." : ""}`;
         }
       }
+      result.push({
+        id: da.id, type: "drag-area",
+        label: name, excerpt: "",
+        color: da.type === "drag-area" ? da.strokeColor : null,
+        shapeId: da.id, parentId: undefined, depth: 0,
+        pocketed: !!da.pocketed,
+      });
+      visited.add(da.id);
+      if (collapsed.has(da.id)) continue;
+      const directChildren = allChildren
+        .filter((s) => !flowParent.has(s.id))
+        .sort(byPos);
+      for (const c of directChildren) visit(c, 1, da.id);
     }
 
-    const rootOthers = others.filter((s) => !s.parentId).sort((a, b) => { const ab = getShapeBounds(a); const bb = getShapeBounds(b); return ab.minY - bb.minY || ab.minX - bb.minX; });
-    for (const s of rootOthers) {
-      if (s.type === "text") {
-        if (!s.text.trim()) continue;
-        result.push({ id: s.id, type: "text", label: s.text.substring(0, 50) + (s.text.length > 50 ? "..." : ""), excerpt: s.text, color: s.backgroundColor || null, shapeId: s.id, parentId: undefined, depth: 0, pocketed: !!s.pocketed });
-      } else if (s.type === "image") {
-        result.push({ id: s.id, type: "image", label: s.name || "Image", excerpt: "", color: null, shapeId: s.id, parentId: undefined, depth: 0, pocketed: !!s.pocketed });
-      }
-    }
+    // Top-level text/image — no drag-area parent, no flowchart parent.
+    const rootOthers = shapes
+      .filter((s) =>
+        (s.type === "text" || s.type === "image") &&
+        !s.parentId &&
+        !flowParent.has(s.id),
+      )
+      .sort(byPos);
+    for (const root of rootOthers) visit(root, 0, undefined);
+
     return result;
   }
 
@@ -96,10 +220,11 @@ export function createShelfPanel(
     const inputBg = theme.variant === "dark" ? "rgba(255,255,255,0.06)" : "#fff";
     const inputBorder = theme.variant === "dark" ? "rgba(255,255,255,0.12)" : "#e5e7eb";
 
-    panel.style.width = isOpen ? "280px" : "24px";
-    panel.style.minWidth = isOpen ? "280px" : "24px";
+    panel.style.width = isOpen ? `${openWidth}px` : "24px";
+    panel.style.minWidth = isOpen ? `${openWidth}px` : "24px";
     grip.textContent = isOpen ? "\u203a" : "\u2039";
     content.style.display = isOpen ? "flex" : "none";
+    resizer.style.display = isOpen ? "block" : "none";
     if (!isOpen) return;
 
     clearChildren(content);

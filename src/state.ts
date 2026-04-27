@@ -960,7 +960,15 @@ export class DrawingState extends EventTarget {
     if (!shape) return;
     const bounds = getShapeBounds(shape);
     const cx = (bounds.minX + bounds.maxX) / 2, cy = (bounds.minY + bounds.maxY) / 2;
-    this.camera = { x: window.innerWidth / 2 - cx * this.camera.zoom, y: window.innerHeight / 2 - cy * this.camera.zoom, zoom: this.camera.zoom };
+    // Use the actual canvas element's dimensions so focus accounts for the
+    // sidebar (canvas !== window when the layout has chrome on the right).
+    const w = this.canvasEl?.clientWidth ?? window.innerWidth;
+    const hgt = this.canvasEl?.clientHeight ?? window.innerHeight;
+    this.camera = {
+      x: w / 2 - cx * this.camera.zoom,
+      y: hgt / 2 - cy * this.camera.zoom,
+      zoom: this.camera.zoom,
+    };
     this.selectedIds = new Set([shapeId]);
     this.notify("camera");
     this.notify("selectedIds");

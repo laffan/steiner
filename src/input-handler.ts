@@ -3,7 +3,8 @@ import {
   cleanLineBreaks, extractDroppedText, extractTextFromDataTransfer,
   fileToDataUrl, getImageDimensions, isImageFile, isTextFile,
 } from "./external-content";
-import { screenToCanvas } from "./utils";
+import { screenToCanvas, getShapeBounds } from "./utils";
+import { CLIPBOARD_SCHEMA, encodeSelection, tryDecode, remapForPaste } from "./clipboard-format";
 import { htmlStringToMarkdown } from "./html-to-markdown";
 
 export interface InputOptions {
@@ -125,6 +126,26 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
           state.redo();
         }
         break;
+      case "c": case "C":
+        if (e.metaKey || e.ctrlKey && !e.shiftKey) {
+          // Don't hijack the system copy when text is being edited.
+          if (document.activeElement instanceof HTMLInputElement) break;
+          if (document.activeElement instanceof HTMLTextAreaElement) break;
+          if (state.editingText) break;
+          if (copySelectionToClipboard(state)) e.preventDefault();
+        }
+        break;
+      case "x": case "X":
+        if (e.metaKey || e.ctrlKey) {
+          if (document.activeElement instanceof HTMLInputElement) break;
+          if (document.activeElement instanceof HTMLTextAreaElement) break;
+          if (state.editingText) break;
+          if (copySelectionToClipboard(state)) {
+            e.preventDefault();
+            state.deleteSelected();
+          }
+        }
+        break;
     }
   }) as unknown as (e: HTMLElementEventMap["keydown"]) => void);
 
@@ -148,6 +169,15 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     const cd = e.clipboardData;
     if (!cd) return;
 
+    // Canvas-clipboard envelope (shared with Hush): detect first, paste shapes
+    // + flowchart edges with remapped IDs.
+    const rawText = extractTextFromDataTransfer(cd);
+    const env = tryDecode(rawText);
+    if (env) {
+      pasteEnvelope(env, state, canvas);
+      return;
+    }
+
     for (const item of Array.from(cd.items)) {
       if (item.type.startsWith("image/")) {
         const file = item.getAsFile();
@@ -159,13 +189,16 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
         }
       }
     }
-    const text = extractTextFromDataTransfer(cd);
-    if (text && text.trim()) state.addTextShapeAtCenter(cleanLineBreaks(text));
+    if (rawText && rawText.trim()) state.addTextShapeAtCenter(cleanLineBreaks(rawText));
   }) as unknown as (e: HTMLElementEventMap["paste"]) => void);
 
   // Drag/drop — capture phase so preventDefault() runs before the browser
   // rejects the drop target. Handles shelf items, file drops, and text drops.
   on(window as unknown as HTMLElement, "dragover", ((e: DragEvent) => {
+    // Let panels with their own drop targets (e.g. the chat history transcript
+    // drop zone) handle the drag themselves.
+    const t = e.target as Element | null;
+    if (t && t.closest("[data-steiner-drop]")) return;
     e.preventDefault();
     if (e.dataTransfer) {
       e.dataTransfer.dropEffect = e.dataTransfer.types.includes("application/x-shelf-index") ? "move" : "copy";
@@ -173,6 +206,8 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
   }) as unknown as (e: HTMLElementEventMap["dragover"]) => void, { capture: true });
 
   on(window as unknown as HTMLElement, "drop", (async (e: DragEvent) => {
+    const t = e.target as Element | null;
+    if (t && t.closest("[data-steiner-drop]")) return;
     e.preventDefault();
     e.stopPropagation();
     if (!e.dataTransfer) return;
@@ -184,6 +219,54 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     if (shelfIdx !== "") {
       inputOpts?.onShelfDrop?.(parseInt(shelfIdx, 10), dropPos.x, dropPos.y);
       return;
+    }
+
+    // Ask-Claude response drop: carries source shape IDs so we can link via flowchart.
+    const askPayload = (() => {
+      try { return e.dataTransfer.getData("application/x-steiner-ask"); }
+      catch { return ""; }
+    })();
+    if (askPayload) {
+      try {
+        const parsed = JSON.parse(askPayload) as { sourceShapeIds?: string[]; text?: string };
+        const text = (parsed.text || "").trim();
+        if (text) {
+          const before = new Set(state.shapes.map((s) => s.id));
+          state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos);
+          const newShape = state.shapes.find((s) => !before.has(s.id));
+          const sourceId = parsed.sourceShapeIds?.[0];
+          if (newShape && sourceId) {
+            // tryConnect both adds the edge AND computes the auto-position
+            // (right of parent, stacked below existing siblings). Translate
+            // the new shape from the drop point to that slot.
+            const newTL = state.flowchart.tryConnect(newShape.id, sourceId, state.shapes);
+            if (newTL) {
+              const oldBounds = getShapeBounds(newShape);
+              const dx = newTL.minX - oldBounds.minX;
+              const dy = newTL.minY - oldBounds.minY;
+              if (dx !== 0 || dy !== 0) {
+                state.shapes = state.shapes.map((s) => {
+                  if (s.id !== newShape.id) return s;
+                  if (s.type === "text" || s.type === "image" || s.type === "drag-area") {
+                    return { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } };
+                  }
+                  return s;
+                });
+              }
+            }
+            // Notify so the canvas-host's debounced save captures the new
+            // shape + edge + repositioned location.
+            state.notify("shapes");
+            // Pan the camera so the auto-positioned node lands in view.
+            state.focusShape(newShape.id);
+          } else {
+            state.notify("shapes");
+          }
+        }
+        return;
+      } catch {
+        // Fall through to normal handlers if payload is malformed.
+      }
     }
 
     // File drops (images, text)
@@ -225,3 +308,44 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
 
   return () => { for (const fn of cleanups) fn(); };
 }
+
+function copySelectionToClipboard(state: import("./state").DrawingState): boolean {
+  const selected = state.shapes.filter((s) => state.selectedIds.has(s.id));
+  if (selected.length === 0) return false;
+  const payload = encodeSelection(selected, state.flowchart.edges);
+  // Best-effort clipboard write. The async API requires a secure context;
+  // Tauri's webview qualifies. If it fails (older WebView, denied permission),
+  // we silently no-op rather than trapping the keyboard shortcut.
+  void navigator.clipboard.writeText(payload).catch(() => {
+    /* clipboard unavailable */
+  });
+  return true;
+}
+
+function pasteEnvelope(
+  env: ReturnType<typeof tryDecode> & object,
+  state: import("./state").DrawingState,
+  canvas: HTMLCanvasElement,
+) {
+  if (!env) return;
+  // Paste at the canvas viewport center in canvas coordinates.
+  const rect = canvas.getBoundingClientRect();
+  const screenCenter = { x: rect.width / 2, y: rect.height / 2 };
+  const target = screenToCanvas(screenCenter, state.camera);
+
+  const { shapes: pasted, edges, newIds } = remapForPaste(env, target);
+  if (pasted.length === 0) return;
+
+  state.shapes = [...state.shapes, ...pasted];
+  for (const e of edges) {
+    state.flowchart.addEdge(e.from, e.to);
+  }
+  state.selectedIds = new Set(newIds);
+  state.recordHistory();
+  state.notify("shapes");
+  state.notify("selectedIds");
+}
+
+// Re-export to keep the unused-import lint quiet on platforms where the
+// module-side check optimizes out the constant.
+void CLIPBOARD_SCHEMA;

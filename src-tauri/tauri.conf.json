@@ -28,5 +28,15 @@
     "iOS": {
       "minimumSystemVersion": "15.0"
     }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["steiner"]
+      },
+      "mobile": [
+        { "scheme": ["steiner"] }
+      ]
+    }
   }
 }

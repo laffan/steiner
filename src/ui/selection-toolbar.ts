@@ -3,8 +3,6 @@ import { COLOR_PALETTE, BACKGROUND_COLORS, TEXT_COLORS } from "../types";
 import { canvasToScreen, computePocketLayout, getShapeBounds } from "../utils";
 import { h, clearChildren } from "./dom-helpers";
 import { icon } from "./icons";
-import type { SteinerBridge } from "../steiner-bridge";
-import { buildSendPayload } from "../steiner-bridge";
 
 export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () => void): HTMLElement {
   const container = h("div", {
@@ -199,13 +197,46 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
     if (hasText) container.appendChild(makeIconBtn("move-to-shelf", "Move to shelf", onMoveToShelf));
 
     if (hasText) {
-      container.appendChild(makeIconBtn("send-to-claude", "Send to Claude", () => {
-        const bridge = (window as unknown as { steiner?: SteinerBridge }).steiner;
-        if (!bridge) return;
-        const payload = buildSendPayload(selected);
-        if (!payload) return;
-        bridge.sendToClaude(payload, false);
-      }));
+      // Capture any active text-editor selection BEFORE the click (mousedown
+      // on a button steals focus from the textarea and clears its selection
+      // on some platforms). preventDefault on mousedown keeps focus, but we
+      // also snapshot the selection eagerly to be safe.
+      let capturedSelection = "";
+      const captureSelection = () => {
+        // Only the inline text-shape editor counts. We deliberately don't fall
+        // back to window.getSelection() here — it leaks selections from
+        // unrelated DOM (e.g. a chip the user just clicked in the sidebar),
+        // which used to make Ask Claude reuse the previous query.
+        capturedSelection = "";
+        const ta = document.querySelector<HTMLTextAreaElement>("textarea.inline-text-editor");
+        if (ta && typeof ta.selectionStart === "number" && typeof ta.selectionEnd === "number"
+          && ta.selectionStart !== ta.selectionEnd) {
+          capturedSelection = ta.value.substring(ta.selectionStart, ta.selectionEnd).trim();
+        }
+      };
+
+      const askBtn = makeIconBtn("send-to-claude", "Ask Claude", () => {
+        const textShapes = selected.filter((s) => s.type === "text") as { id: string; text: string }[];
+        if (textShapes.length === 0) return;
+        let seed = capturedSelection;
+        if (!seed) {
+          seed = textShapes.map((s) => s.text.trim()).filter(Boolean).join("\n\n");
+        }
+        if (!seed) return;
+        const hook = (window as unknown as {
+          steinerAskClaude?: (ids: string[], text: string) => void;
+        }).steinerAskClaude;
+        if (hook) hook(textShapes.map((s) => s.id), seed);
+      });
+      askBtn.addEventListener("pointerdown", (e) => {
+        // Snapshot before focus shifts; preventDefault keeps the textarea
+        // focused so its visible selection (and any subsequent paste) is
+        // preserved if the user re-engages with it.
+        captureSelection();
+        e.preventDefault();
+      });
+      container.appendChild(askBtn);
+
     }
 
     if (hasImage && selected.length === 1) {

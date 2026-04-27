@@ -2,249 +2,780 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use chrono::Utc;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl,
-    WindowEvent,
-};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl};
+use uuid::Uuid;
 
-const CANVAS_LABEL: &str = "canvas";
-const CLAUDE_LABEL: &str = "claude";
-const WINDOW_LABEL: &str = "main";
+mod dropbox;
 
-const CLAUDE_INIT_SCRIPT: &str = include_str!("../../src/claude-content-script.js");
+const DEFAULT_MODEL: &str = "claude-opus-4-7";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Snippet {
+pub struct Message {
     pub id: String,
-    pub text: String,
-    pub url: String,
+    pub role: String, // "user" | "assistant"
+    pub content: String,
     pub timestamp: String,
-    pub context: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CanvasState {
+    #[serde(default)]
+    pub shapes: serde_json::Value,
+    #[serde(default)]
+    pub snippet_meta: serde_json::Value,
+    #[serde(default)]
+    pub flow_edges: serde_json::Value,
+    #[serde(default)]
+    pub shape_chats: serde_json::Value,
+    #[serde(default)]
+    pub transcripts: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub model: String,
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub canvas: CanvasState,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMeta {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub model: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub ask_word_limit: Option<u32>,
+    #[serde(default)]
+    pub ask_model: Option<String>,
+    #[serde(default)]
+    pub dropbox_access_token: Option<String>,
+    #[serde(default)]
+    pub dropbox_refresh_token: Option<String>,
+    #[serde(default)]
+    pub dropbox_account_email: Option<String>,
+    #[serde(default)]
+    pub dropbox_last_sync: Option<String>,
 }
 
 pub struct AppState {
-    pub split_fraction: Mutex<f64>,
+    pub current_stream: Mutex<Option<String>>, // session_id of in-flight stream
 }
 
-#[tauri::command]
-fn pin_snippet(app: AppHandle, snippet: Snippet) -> Result<(), String> {
-    log::info!(
-        "pin_snippet received from claude webview: {} chars",
-        snippet.text.len()
-    );
-    app.emit_to(CANVAS_LABEL, "snippet-pinned", &snippet)
-        .map_err(|e| e.to_string())?;
-    append_snippet(&app, &snippet)?;
-    Ok(())
-}
-
-#[tauri::command]
-fn send_to_claude(app: AppHandle, text: String, submit: bool) -> Result<bool, String> {
-    let claude = app
-        .get_webview(CLAUDE_LABEL)
-        .ok_or_else(|| "claude webview not found".to_string())?;
-    let payload = serde_json::json!({ "text": text, "submit": submit });
-    let js = format!(
-        "window.__steinerSendToClaude && window.__steinerSendToClaude({})",
-        payload
-    );
-    claude.eval(&js).map_err(|e| e.to_string())?;
-    let _ = claude.set_focus();
-    Ok(true)
-}
-
-#[tauri::command]
-fn set_split_fraction(app: AppHandle, fraction: f64) -> Result<(), String> {
-    let f = fraction.clamp(0.15, 0.85);
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(mut split) = state.split_fraction.lock() {
-            *split = f;
-        }
-    }
-    layout_webviews(&app, f)
-}
-
-#[tauri::command]
-fn nudge_split(app: AppHandle, delta_pixels: f64) -> Result<(), String> {
-    let window = app
-        .get_window(WINDOW_LABEL)
-        .ok_or_else(|| "main window not found".to_string())?;
-    let size = window.inner_size().map_err(|e| e.to_string())?;
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let logical_w = size.width as f64 / scale;
-    if logical_w <= 0.0 {
-        return Ok(());
-    }
-    let current = current_fraction(&app);
-    let new_fraction = ((current * logical_w) + delta_pixels) / logical_w;
-    set_split_fraction(app, new_fraction)
-}
-
-#[tauri::command]
-fn load_snippets(app: AppHandle) -> Result<Vec<Snippet>, String> {
-    let path = snippets_path(&app)?;
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    if raw.trim().is_empty() {
-        return Ok(vec![]);
-    }
-    serde_json::from_str(&raw).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn load_canvas_state(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let path = canvas_path(&app)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    if raw.trim().is_empty() {
-        return Ok(None);
-    }
-    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    Ok(Some(v))
-}
-
-#[tauri::command]
-fn save_canvas_state(app: AppHandle, state: serde_json::Value) -> Result<(), String> {
-    let path = canvas_path(&app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let raw = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
-    fs::write(&path, raw).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn append_snippet(app: &AppHandle, snippet: &Snippet) -> Result<(), String> {
-    let path = snippets_path(app)?;
-    let mut snippets: Vec<Snippet> = if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        if raw.trim().is_empty() {
-            vec![]
-        } else {
-            serde_json::from_str(&raw).unwrap_or_default()
-        }
-    } else {
-        vec![]
-    };
-    snippets.push(snippet.clone());
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let raw = serde_json::to_string_pretty(&snippets).map_err(|e| e.to_string())?;
-    fs::write(&path, raw).map_err(|e| e.to_string())?;
-    Ok(())
-}
+// --- Path helpers ---
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path().app_data_dir().map_err(|e| e.to_string())
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
 }
 
-fn snippets_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(data_dir(app)?.join("snippets.json"))
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join("settings.json"))
 }
 
-fn canvas_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(data_dir(app)?.join("canvas.json"))
+pub(crate) fn sessions_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let d = data_dir(app)?.join("sessions");
+    fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    Ok(d)
 }
 
-fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(data_dir(app)?.join("session.json"))
+pub(crate) fn session_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    Ok(sessions_dir(app)?.join(format!("{}.json", id)))
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct Session {
-    #[serde(default)]
-    last_claude_url: Option<String>,
-}
+// --- Settings ---
 
-fn read_session(app: &AppHandle) -> Session {
-    let Ok(path) = session_path(app) else {
-        return Session::default();
+pub(crate) fn read_settings(app: &AppHandle) -> Settings {
+    let Ok(p) = settings_path(app) else {
+        return Settings::default();
     };
-    let Ok(raw) = fs::read_to_string(&path) else {
-        return Session::default();
+    let Ok(raw) = fs::read_to_string(&p) else {
+        return Settings::default();
     };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-fn write_session(app: &AppHandle, session: &Session) -> Result<(), String> {
-    let path = session_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+pub(crate) fn write_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
+    let p = settings_path(app)?;
+    let raw = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    fs::write(&p, raw).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_settings(app: AppHandle) -> Settings {
+    let mut s = read_settings(&app);
+    if let Some(k) = s.anthropic_api_key.as_deref() {
+        // Don't expose the full key; surface presence only.
+        let masked = if k.len() > 8 {
+            format!("{}…{}", &k[..4], &k[k.len() - 4..])
+        } else {
+            "set".to_string()
+        };
+        s.anthropic_api_key = Some(masked);
     }
-    let raw = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
-    fs::write(&path, raw).map_err(|e| e.to_string())?;
+    // Tokens are sensitive; surface only "set" so the UI can show linked status
+    // without ever exposing the actual token to the renderer.
+    if s.dropbox_access_token.is_some() {
+        s.dropbox_access_token = Some("set".to_string());
+    }
+    if s.dropbox_refresh_token.is_some() {
+        s.dropbox_refresh_token = Some("set".to_string());
+    }
+    s
+}
+
+#[tauri::command]
+fn set_api_key(app: AppHandle, key: String) -> Result<(), String> {
+    let mut s = read_settings(&app);
+    let trimmed = key.trim();
+    s.anthropic_api_key = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    write_settings(&app, &s)
+}
+
+#[tauri::command]
+fn set_ask_word_limit(app: AppHandle, limit: u32) -> Result<(), String> {
+    let mut s = read_settings(&app);
+    let clamped = limit.clamp(20, 2000);
+    s.ask_word_limit = Some(clamped);
+    write_settings(&app, &s)
+}
+
+#[tauri::command]
+fn set_ask_model(app: AppHandle, model: String) -> Result<(), String> {
+    let mut s = read_settings(&app);
+    let trimmed = model.trim();
+    s.ask_model = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    write_settings(&app, &s)
+}
+
+// --- Sessions ---
+
+pub(crate) fn read_session(app: &AppHandle, id: &str) -> Result<Session, String> {
+    let p = session_path(app, id)?;
+    let raw = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
+}
+
+fn write_session(app: &AppHandle, s: &Session) -> Result<(), String> {
+    let p = session_path(app, &s.id)?;
+    let raw = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    fs::write(&p, raw).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_sessions(app: AppHandle) -> Result<Vec<SessionMeta>, String> {
+    let dir = sessions_dir(&app)?;
+    let mut metas: Vec<SessionMeta> = Vec::new();
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(s): Result<Session, _> = serde_json::from_str(&raw) else {
+            continue;
+        };
+        metas.push(SessionMeta {
+            id: s.id,
+            title: s.title,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+            model: s.model,
+            archived: s.archived,
+        });
+    }
+    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(metas)
+}
+
+#[tauri::command]
+fn create_session(
+    app: AppHandle,
+    title: Option<String>,
+    model: Option<String>,
+) -> Result<Session, String> {
+    let now = Utc::now().to_rfc3339();
+    let s = Session {
+        id: format!("sess_{}", Uuid::new_v4().simple()),
+        title: title.unwrap_or_else(|| "New session".to_string()),
+        created_at: now.clone(),
+        updated_at: now,
+        model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        messages: Vec::new(),
+        canvas: CanvasState::default(),
+        archived: false,
+    };
+    write_session(&app, &s)?;
+    Ok(s)
+}
+
+#[tauri::command]
+fn get_session(app: AppHandle, id: String) -> Result<Session, String> {
+    read_session(&app, &id)
+}
+
+#[tauri::command]
+fn update_session_title(app: AppHandle, id: String, title: String) -> Result<(), String> {
+    let mut s = read_session(&app, &id)?;
+    s.title = title;
+    s.updated_at = Utc::now().to_rfc3339();
+    write_session(&app, &s)
+}
+
+#[tauri::command]
+fn update_session_model(app: AppHandle, id: String, model: String) -> Result<(), String> {
+    let mut s = read_session(&app, &id)?;
+    s.model = model;
+    s.updated_at = Utc::now().to_rfc3339();
+    write_session(&app, &s)
+}
+
+#[tauri::command]
+fn save_session_canvas(app: AppHandle, id: String, canvas: CanvasState) -> Result<(), String> {
+    let mut s = read_session(&app, &id)?;
+    s.canvas = canvas;
+    s.updated_at = Utc::now().to_rfc3339();
+    write_session(&app, &s)
+}
+
+#[tauri::command]
+fn set_session_archived(app: AppHandle, id: String, archived: bool) -> Result<(), String> {
+    let mut s = read_session(&app, &id)?;
+    s.archived = archived;
+    s.updated_at = Utc::now().to_rfc3339();
+    write_session(&app, &s)
+}
+
+#[tauri::command]
+fn delete_session(app: AppHandle, id: String) -> Result<(), String> {
+    let p = session_path(&app, &id)?;
+    if p.exists() {
+        fs::remove_file(&p).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn set_last_url(app: AppHandle, url: String) -> Result<(), String> {
-    if !url.starts_with("https://claude.ai")
-        && !url.starts_with("https://www.claude.ai")
-    {
-        return Ok(());
-    }
-    let mut s = read_session(&app);
-    if s.last_claude_url.as_deref() == Some(url.as_str()) {
-        return Ok(());
-    }
-    s.last_claude_url = Some(url);
-    write_session(&app, &s)
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
-fn layout_webviews(app: &AppHandle, fraction: f64) -> Result<(), String> {
-    let window = app
-        .get_window(WINDOW_LABEL)
-        .ok_or_else(|| "main window not found".to_string())?;
-    let size = window.inner_size().map_err(|e| e.to_string())?;
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
-    let split = (logical_w * fraction).round();
-    let right_w = (logical_w - split).max(1.0);
+#[tauri::command]
+fn export_session_markdown(app: AppHandle, id: String) -> Result<String, String> {
+    let s = read_session(&app, &id)?;
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", s.title));
+    out.push_str(&format!("_Model: {} · Updated: {}_\n\n", s.model, s.updated_at));
 
-    if let Some(claude) = app.get_webview(CLAUDE_LABEL) {
-        let _ = claude.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = claude.set_size(LogicalSize::new(split, logical_h));
+    if let Ok(snippets) = serde_json::from_value::<Vec<serde_json::Value>>(
+        s.canvas.shapes.clone(),
+    ) {
+        let texts: Vec<String> = snippets
+            .iter()
+            .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(|t| t.to_string()))
+            .collect();
+        if !texts.is_empty() {
+            out.push_str("## Pinned snippets\n\n");
+            for t in texts {
+                out.push_str(&format!("- {}\n", t.replace('\n', " ")));
+            }
+            out.push('\n');
+        }
     }
-    if let Some(canvas) = app.get_webview(CANVAS_LABEL) {
-        let _ = canvas.set_position(LogicalPosition::new(split, 0.0));
-        let _ = canvas.set_size(LogicalSize::new(right_w, logical_h));
+
+    out.push_str("## Conversation\n\n");
+    for m in &s.messages {
+        let label = if m.role == "user" { "**You**" } else { "**Claude**" };
+        out.push_str(&format!("{}\n\n{}\n\n", label, m.content));
     }
+    Ok(out)
+}
+
+// --- Claude API streaming ---
+
+#[derive(Debug, Serialize)]
+struct ApiMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiRequest<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    messages: Vec<ApiMessage<'a>>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn send_message(
+    app: AppHandle,
+    session_id: String,
+    content: String,
+) -> Result<String, String> {
+    let settings = read_settings(&app);
+    let api_key = settings
+        .anthropic_api_key
+        .ok_or_else(|| "No API key set. Open settings and paste your Anthropic key.".to_string())?;
+
+    // Append user message and persist.
+    let mut session = read_session(&app, &session_id)?;
+    let user_msg = Message {
+        id: format!("msg_{}", Uuid::new_v4().simple()),
+        role: "user".to_string(),
+        content: content.clone(),
+        timestamp: Utc::now().to_rfc3339(),
+    };
+    session.messages.push(user_msg.clone());
+    session.updated_at = Utc::now().to_rfc3339();
+    if session.messages.len() == 1 {
+        // Auto-title from first user message.
+        let snippet: String = content.chars().take(60).collect();
+        session.title = snippet.trim().to_string();
+    }
+    write_session(&app, &session)?;
+    let _ = app.emit("session-updated", &session_id);
+
+    let model = session.model.clone();
+    let api_messages: Vec<ApiMessage> = session
+        .messages
+        .iter()
+        .map(|m| ApiMessage {
+            role: m.role.as_str(),
+            content: m.content.as_str(),
+        })
+        .collect();
+
+    let body = ApiRequest {
+        model: &model,
+        max_tokens: 16000,
+        messages: api_messages,
+        stream: true,
+        system: None,
+        output_config: None,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(ANTHROPIC_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let err = format!("Anthropic API error ({}): {}", status, text);
+        let _ = app.emit("chat-error", serde_json::json!({ "session_id": session_id, "message": err }));
+        return Err(err);
+    }
+
+    let assistant_id = format!("msg_{}", Uuid::new_v4().simple());
+    let _ = app.emit(
+        "chat-start",
+        serde_json::json!({ "session_id": session_id, "message_id": assistant_id }),
+    );
+
+    let mut accumulated = String::new();
+    let mut buffer = String::new();
+    let mut stream = resp.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                let err = format!("stream error: {}", e);
+                let _ = app.emit(
+                    "chat-error",
+                    serde_json::json!({ "session_id": session_id, "message": err }),
+                );
+                return Err(err);
+            }
+        };
+        let s = String::from_utf8_lossy(&bytes);
+        buffer.push_str(&s);
+
+        // Process complete SSE events (separated by blank lines).
+        while let Some(idx) = buffer.find("\n\n") {
+            let event_block: String = buffer.drain(..idx + 2).collect();
+            for line in event_block.lines() {
+                let line = line.trim();
+                if let Some(payload) = line.strip_prefix("data:") {
+                    let payload = payload.trim();
+                    if payload.is_empty() || payload == "[DONE]" {
+                        continue;
+                    }
+                    let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) else {
+                        continue;
+                    };
+                    let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if event_type == "content_block_delta" {
+                        if let Some(text) = json
+                            .get("delta")
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            accumulated.push_str(text);
+                            let _ = app.emit(
+                                "chat-delta",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "message_id": assistant_id,
+                                    "text": text,
+                                }),
+                            );
+                        }
+                    } else if event_type == "message_stop" {
+                        // handled after loop
+                    } else if event_type == "error" {
+                        let err = json
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        let _ = app.emit(
+                            "chat-error",
+                            serde_json::json!({ "session_id": session_id, "message": err }),
+                        );
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Persist assistant message.
+    let mut session = read_session(&app, &session_id)?;
+    session.messages.push(Message {
+        id: assistant_id.clone(),
+        role: "assistant".to_string(),
+        content: accumulated.clone(),
+        timestamp: Utc::now().to_rfc3339(),
+    });
+    session.updated_at = Utc::now().to_rfc3339();
+    write_session(&app, &session)?;
+
+    let _ = app.emit(
+        "chat-done",
+        serde_json::json!({
+            "session_id": session_id,
+            "message_id": assistant_id,
+            "text": accumulated,
+        }),
+    );
+    let _ = app.emit("session-updated", &session_id);
+    Ok(assistant_id)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AskMessage {
+    pub role: String,
+    pub content: String,
+}
+
+const ASK_STRUCTURED_SYSTEM: &str = "You return responses as JSON conforming to the provided schema. The output is a `segments` array; each segment has a `kind` and a `text` field.\n\n\
+Use these kinds:\n\
+- `name` — a proper noun: a specific person, place, organization, product, etc.\n\
+- `concept` — a key technical term or idea worth investigating further.\n\
+- `book` — the title of a book, article, paper, essay, film, album, or similar named work.\n\
+- `definition` — a short explanatory phrase that defines or describes the term that immediately precedes it.\n\
+- `text` — connective prose between highlights.\n\n\
+RULES:\n\
+1. When a `definition` segment appears, the IMMEDIATELY PRECEDING segment of any kind (skipping over whitespace-only `text` segments like `\" — \"` or `\": \"`) must be the `name`/`concept`/`book` it defines. Definitions never stand alone.\n\
+2. Aim for 4–12 highlight segments (`name`/`concept`/`book`, with optional paired `definition`s) interleaved with `text` segments.\n\
+3. Do not split single words across segments. Keep highlight segments compact (2–15 words).\n\
+4. Concatenating every segment's `text` in order should read as natural, well-punctuated prose — include leading/trailing spaces and punctuation as needed in each segment's text.";
+
+fn ask_response_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["text", "concept", "definition", "name", "book"]
+                        },
+                        "text": { "type": "string" }
+                    },
+                    "required": ["kind", "text"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["segments"],
+        "additionalProperties": false
+    })
+}
+
+#[tauri::command]
+async fn ask_claude_stream(
+    app: AppHandle,
+    request_id: String,
+    messages: Vec<AskMessage>,
+    model: Option<String>,
+) -> Result<(), String> {
+    let settings = read_settings(&app);
+    let api_key = settings
+        .anthropic_api_key
+        .ok_or_else(|| "No API key set. Open settings and paste your Anthropic key.".to_string())?;
+
+    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let api_messages: Vec<ApiMessage> = messages
+        .iter()
+        .map(|m| ApiMessage {
+            role: m.role.as_str(),
+            content: m.content.as_str(),
+        })
+        .collect();
+
+    let body = ApiRequest {
+        model: &model,
+        max_tokens: 1024,
+        messages: api_messages,
+        stream: true,
+        system: Some(ASK_STRUCTURED_SYSTEM),
+        output_config: Some(serde_json::json!({
+            "format": {
+                "type": "json_schema",
+                "schema": ask_response_schema(),
+            }
+        })),
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(ANTHROPIC_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let err = format!("Anthropic API error ({}): {}", status, text);
+        let _ = app.emit(
+            "ask-error",
+            serde_json::json!({ "request_id": request_id, "message": err }),
+        );
+        return Err(err);
+    }
+
+    let _ = app.emit(
+        "ask-start",
+        serde_json::json!({ "request_id": request_id }),
+    );
+
+    let mut accumulated = String::new();
+    let mut buffer = String::new();
+    let mut stream = resp.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                let err = format!("stream error: {}", e);
+                let _ = app.emit(
+                    "ask-error",
+                    serde_json::json!({ "request_id": request_id, "message": err }),
+                );
+                return Err(err);
+            }
+        };
+        let s = String::from_utf8_lossy(&bytes);
+        buffer.push_str(&s);
+
+        while let Some(idx) = buffer.find("\n\n") {
+            let event_block: String = buffer.drain(..idx + 2).collect();
+            for line in event_block.lines() {
+                let line = line.trim();
+                if let Some(payload) = line.strip_prefix("data:") {
+                    let payload = payload.trim();
+                    if payload.is_empty() || payload == "[DONE]" {
+                        continue;
+                    }
+                    let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) else {
+                        continue;
+                    };
+                    let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if event_type == "content_block_delta" {
+                        if let Some(text) = json
+                            .get("delta")
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            accumulated.push_str(text);
+                            let _ = app.emit(
+                                "ask-delta",
+                                serde_json::json!({
+                                    "request_id": request_id,
+                                    "text": text,
+                                }),
+                            );
+                        }
+                    } else if event_type == "error" {
+                        let err = json
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        let _ = app.emit(
+                            "ask-error",
+                            serde_json::json!({ "request_id": request_id, "message": err }),
+                        );
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse the accumulated JSON into segments. If parsing fails (model
+    // didn't conform), fall back to emitting just the raw text so the
+    // frontend can still surface something to the user.
+    let parsed: Option<Vec<serde_json::Value>> =
+        serde_json::from_str::<serde_json::Value>(&accumulated)
+            .ok()
+            .and_then(|v| v.get("segments").cloned())
+            .and_then(|s| s.as_array().cloned());
+
+    let plain_text = parsed
+        .as_ref()
+        .map(|segs| {
+            segs.iter()
+                .filter_map(|seg| seg.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_else(|| accumulated.clone());
+
+    let _ = app.emit(
+        "ask-done",
+        serde_json::json!({
+            "request_id": request_id,
+            "text": plain_text,
+            "segments": parsed,
+            "raw": accumulated,
+        }),
+    );
     Ok(())
 }
 
-fn current_fraction(app: &AppHandle) -> f64 {
-    app.try_state::<AppState>()
-        .and_then(|s| s.split_fraction.lock().ok().map(|g| *g))
-        .unwrap_or(0.5)
+// --- Setup ---
+
+#[cfg(desktop)]
+fn build_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("Steiner")
+        .inner_size(1400.0, 900.0)
+        .min_inner_size(700.0, 500.0)
+        .resizable(true)
+        .disable_drag_drop_handler()
+        .build()?;
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+fn build_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .disable_drag_drop_handler()
+        .build()?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    // Single-instance: a second launch (e.g. macOS opening the steiner://
+    // OAuth callback URL) forwards its argv to the running instance instead
+    // of starting a fresh process. The deep-link plugin's macOS Apple Event
+    // handler covers most cases, but in dev mode LaunchServices can route to
+    // a stale binary; this is the belt to that suspenders.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            log::info!("[steiner] single-instance second-launch argv: {:?}", argv);
+            let _ = app.emit("steiner://second-instance", argv);
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(AppState {
-            split_fraction: Mutex::new(0.5),
+            current_stream: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
-            pin_snippet,
-            send_to_claude,
-            set_split_fraction,
-            nudge_split,
-            set_last_url,
-            load_snippets,
-            load_canvas_state,
-            save_canvas_state,
+            get_settings,
+            set_api_key,
+            set_ask_word_limit,
+            set_ask_model,
+            list_sessions,
+            create_session,
+            get_session,
+            update_session_title,
+            update_session_model,
+            set_session_archived,
+            save_session_canvas,
+            delete_session,
+            export_session_markdown,
+            write_text_file,
+            send_message,
+            ask_claude_stream,
+            dropbox::dropbox_exchange_code,
+            dropbox::dropbox_refresh_token,
+            dropbox::dropbox_disconnect,
+            dropbox::dropbox_status,
+            dropbox::dropbox_sync_now,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -255,83 +786,29 @@ pub fn run() {
                 )?;
             }
 
-            let initial_w = 1400.0_f64;
-            let initial_h = 900.0_f64;
-
-            let session = read_session(app.handle());
-            let claude_url = session
-                .last_claude_url
-                .as_deref()
-                .filter(|u| u.starts_with("https://claude.ai") || u.starts_with("https://www.claude.ai"))
-                .unwrap_or("https://claude.ai/")
-                .to_string();
-
-            let window = tauri::window::WindowBuilder::new(app, WINDOW_LABEL)
-                .title("Steiner — AI Brainstorm")
-                .inner_size(initial_w, initial_h)
-                .min_inner_size(800.0, 500.0)
-                .resizable(true)
-                .build()?;
-
-            let half = (initial_w / 2.0).round();
-
-            let app_for_nav = app.handle().clone();
-            let claude_webview = WebviewBuilder::new(
-                CLAUDE_LABEL,
-                WebviewUrl::External(claude_url.parse().unwrap()),
-            )
-            .initialization_script(CLAUDE_INIT_SCRIPT)
-            .on_navigation(move |url| {
-                let s = url.to_string();
-                if s.starts_with("https://claude.ai") || s.starts_with("https://www.claude.ai") {
-                    let _ = set_last_url(app_for_nav.clone(), s);
+            // Claim the steiner:// scheme for the running binary at startup.
+            // In dev mode LaunchServices may have a stale handler registered
+            // from a previous build; register_all forces it to point at the
+            // current binary so the OAuth callback lands here. Mirrored on
+            // mobile where the entitlement registration happens via the bundle.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register_all() {
+                    log::warn!("[steiner] deep-link register_all failed: {:?}", e);
                 }
-                true
-            });
+                let app_for_deep = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> =
+                        event.urls().iter().map(|u| u.to_string()).collect();
+                    log::info!("[steiner] deep-link on_open_url: {:?}", urls);
+                    // Emit a fallback event the frontend listens for in case
+                    // the JS plugin's onOpenUrl misses the delivery in dev.
+                    let _ = app_for_deep.emit("steiner://deep-link", &urls);
+                });
+            }
 
-            let canvas_webview =
-                WebviewBuilder::new(CANVAS_LABEL, WebviewUrl::App("index.html".into()))
-                    .disable_drag_drop_handler();
-
-            window.add_child(
-                claude_webview,
-                LogicalPosition::new(0.0, 0.0),
-                LogicalSize::new(half, initial_h),
-            )?;
-
-            window.add_child(
-                canvas_webview,
-                LogicalPosition::new(half, 0.0),
-                LogicalSize::new(initial_w - half, initial_h),
-            )?;
-
-            let app_for_resize = app.handle().clone();
-            window.on_window_event(move |event| {
-                if matches!(
-                    event,
-                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
-                ) {
-                    let f = current_fraction(&app_for_resize);
-                    let _ = layout_webviews(&app_for_resize, f);
-                }
-            });
-
-            let app_for_shortcut = app.handle().clone();
-            let shortcut = Shortcut::new(
-                Some(Modifiers::SUPER | Modifiers::SHIFT),
-                Code::KeyP,
-            );
-            app.global_shortcut()
-                .on_shortcut(shortcut, move |_app, _sc, event| {
-                    if event.state == ShortcutState::Pressed {
-                        if let Some(claude) = app_for_shortcut.get_webview(CLAUDE_LABEL) {
-                            let _ = claude.eval(
-                                "window.__steinerCapturePin && window.__steinerCapturePin()",
-                            );
-                        }
-                    }
-                })?;
-
+            build_window(app)?;
             Ok(())
         })
         .run(tauri::generate_context!())

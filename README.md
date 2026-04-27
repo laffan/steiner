@@ -100,12 +100,69 @@ is idempotent — re-running it skips files already on disk.
 To use your own icon, run `npx tauri icon path/to/source.png` after the
 asset fetch (it overwrites the icon set).
 
+## Cross-app clipboard (`canvas-clipboard@1`)
+
+Steiner and [Hush](https://github.com/laffan/hush) share the same canvas
+engine, so copy/paste round-trips between them. Both apps put a JSON envelope
+on the system clipboard as `text/plain`:
+
+```json
+{
+  "schema": "canvas-clipboard@1",
+  "shapes": [ /* full shape objects, including text/image/drag-area */ ],
+  "flowEdges": [ { "id": "...", "from": "...", "to": "..." } ]
+}
+```
+
+**Producer rules (when copying):**
+
+- `shapes` — every shape in the current selection, deep-cloned with original
+  IDs intact. Field naming matches the in-memory `Shape` types (camelCase).
+- `flowEdges` — only edges whose `from` and `to` are *both* in the copy set.
+  Orphan edges are dropped at copy time so they never reach the receiver.
+- Unknown future fields are allowed; receivers must ignore what they don't
+  understand.
+
+**Consumer rules (when pasting):**
+
+1. Cheap header check — only attempt JSON.parse when the clipboard text
+   starts with `{` and contains `"canvas-clipboard@1"`.
+2. Validate `schema === "canvas-clipboard@1"` and `Array.isArray(shapes)`.
+3. **Regenerate every shape ID** to avoid colliding with shapes already on
+   the receiver's canvas. Build an `oldId → newId` map.
+4. Remap `parentId` references through the map; if a shape's parent isn't in
+   the paste set, clear `parentId` (the shape becomes a root on the
+   receiver).
+5. Clear `groupId` so pasted shapes don't accidentally join an existing
+   group.
+6. Rewrite each `flowEdge` with a fresh `id` and remapped `from` / `to`.
+   Drop edges whose endpoints aren't both in the map.
+7. Translate every shape's `position` so the paste's bounding-box center
+   lands at a sensible target (Steiner uses the canvas viewport center).
+8. Append the new shapes; add the new edges via the flowchart layer; select
+   the new shapes.
+
+The reference implementation is [`src/clipboard-format.ts`](./src/clipboard-format.ts)
+(`encodeSelection`, `tryDecode`, `remapForPaste`) plus the keyboard wiring in
+[`src/input-handler.ts`](./src/input-handler.ts) — Cmd/Ctrl+C, Cmd/Ctrl+X,
+and the envelope check in the `paste` handler. Mirroring those four hooks in
+Hush is the entire integration.
+
+**Versioning:** the `@1` suffix is the format version. Breaking shape-schema
+changes bump it (`canvas-clipboard@2`); additive fields don't. Receivers
+should compare the full string for equality, not parse it.
+
 ## Keyboard shortcuts
 
 | Key            | Action                                                  |
 | -------------- | ------------------------------------------------------- |
 | **⌘⇧P**        | Pin current claude.ai selection (global)                |
 | **Escape**     | Cancel pending pin                                      |
+| **⌘C / ⌘X**    | Copy / cut selected canvas shapes (`canvas-clipboard@1`)|
+| **⌘V**         | Paste shapes (envelope) or text/image (fallback)        |
+| **⌘B**         | Wrap selection in `**bold**` while editing text         |
+| **⌘I**         | Wrap selection in `*italic*` while editing text         |
+| **⌘⇧H**        | Wrap selection in `==highlight==` while editing text    |
 | (canvas)       | All shortcuts inherited from tauri-drawing              |
 
 ## Inherited canvas features

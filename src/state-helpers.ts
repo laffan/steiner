@@ -129,7 +129,9 @@ export function applyCropResize(origShape: ImageShape, handle: ResizeHandle, ori
   return { ...origShape, position: { x: minX, y: minY }, width: maxX - minX, height: maxY - minY, crop: { x: cropX, y: cropY, w: cropW, h: cropH } };
 }
 
-/** Measure widest rendered line (accounting for heading scale, bold/italic + font) and return fitted width. */
+/** Measure widest rendered line (accounting for heading scale, bold/italic + font) and return fitted width.
+ *  Measures word-by-word + inter-word spaces the same way `wrapRuns` does during rendering,
+ *  so the returned width is wide enough that the renderer won't wrap the text back onto a new line. */
 export function autoFitWidth(text: string, fontSize: number, constraintWidth: number | undefined, fontFamily: string): number {
   const cw = constraintWidth || 350;
   const ff = `${fontFamily}, ${FONT_FAMILY}`;
@@ -138,16 +140,33 @@ export function autoFitWidth(text: string, fontSize: number, constraintWidth: nu
   for (const line of text.split("\n")) {
     const parsed = parseLine(line);
     const lineFontSize = fontSize * parsed.sizeScale;
+    // Mirror wrapRuns: split each run into words, measure each word
+    // individually, and insert an explicit space width between consecutive
+    // words. Canvas text metrics for a joined string can differ from the
+    // sum of its word/space pieces — measuring the same way the wrapper
+    // does keeps us safe from a fit-then-wrap mismatch.
     let lineW = 0;
+    let hasPrevWord = false;
     for (const run of parsed.runs) {
       const weight = run.bold ? "bold" : "normal";
       const style = run.italic ? "italic" : "normal";
       ctx.font = `${style} ${weight} ${lineFontSize}px ${ff}`;
-      lineW += ctx.measureText(run.text).width;
+      const spaceW = ctx.measureText(" ").width;
+      const parts = run.text.split(/( )/);
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (part === "" || part === " ") continue;
+        if (hasPrevWord) lineW += spaceW;
+        lineW += ctx.measureText(part).width;
+        hasPrevWord = true;
+      }
     }
     maxW = Math.max(maxW, lineW);
   }
-  return maxW < cw ? Math.max(30, maxW + 8) : cw;
+  // Round up and add a small safety pad so sub-pixel / hinting differences
+  // between measure and render don't trigger a wrap.
+  if (maxW >= cw) return cw;
+  return Math.max(60, Math.ceil(maxW) + 4);
 }
 
 /** Hit-test screen point against pocketed shapes (rendered in screen space). Returns shape IDs if hit. */

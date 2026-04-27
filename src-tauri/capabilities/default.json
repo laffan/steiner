@@ -1,19 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for the canvas webview (local app)",
+  "description": "Default permissions",
   "windows": ["main"],
-  "webviews": ["canvas"],
   "permissions": [
     "core:default",
     "core:webview:allow-internal-toggle-devtools",
+    "deep-link:default",
     "dialog:default",
     "dialog:allow-save",
     "dialog:allow-open",
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-write-file",
-    "global-shortcut:default",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
