@@ -980,11 +980,12 @@ export class DrawingState extends EventTarget {
   /**
    * Apply both foreground and background color to all selected text shapes.
    * Used by the term-style presets (Concept/Name/Book/Definition) to give a
-   * canvas note the same look as a highlighted chip in the chat panel.
+   * canvas note the same look as a highlighted chip in the chat panel, plus
+   * a "No style" entry that clears the background (pass undefined).
    * Hex strings bypass the palette so the term colors don't have to be
    * registered as named entries.
    */
-  applyTextStyle(fg: string, bg: string) {
+  applyTextStyle(fg: string, bg: string | undefined) {
     this.shapes = this.shapes.map((s) => {
       if (!this.selectedIds.has(s.id)) return s;
       if (s.type !== "text") return s;

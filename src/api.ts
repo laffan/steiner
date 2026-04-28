@@ -26,6 +26,11 @@ export interface ShapeChat {
   id: string;
   created_at: string;
   messages: ChatMessage[];
+  /** Snapshot of the source shape's text at chat creation. Used by the
+   *  history panel as a fallback header when the source shape no longer
+   *  exists on the canvas (the row stops being click-to-focus but still
+   *  shows what the chat was about). */
+  source_text?: string;
 }
 
 export interface TranscriptEntry {

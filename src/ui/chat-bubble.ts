@@ -175,18 +175,31 @@ function renderSegment(
     e.stopPropagation();
     // Default text is the term/definition pair (or just the segment text).
     let text = dragTextForSegment(segments, index);
-    // A user text-selection inside this span overrides the paired form so
-    // the user can grab a sub-phrase if they want.
+    // A user text-selection drives whether the structured-response specials
+    // (kind styling, auto-pair with definition) apply:
+    //   - selection lives entirely inside this span → still a single-kind
+    //     drag, but use the user's sub-phrase as the dragged text
+    //   - selection spans past the span boundary → drop the kind/pair and
+    //     send plain text only (the user is grabbing a multi-segment slice
+    //     and shouldn't get the highlight color or attached definition)
+    let attachKind = true;
     const sel = window.getSelection();
-    if (sel && !sel.isCollapsed && sel.anchorNode && span.contains(sel.anchorNode)) {
+    if (sel && !sel.isCollapsed && sel.anchorNode) {
+      const startsHere = span.contains(sel.anchorNode);
+      const endsHere = sel.focusNode ? span.contains(sel.focusNode) : false;
       const picked = sel.toString().trim();
-      if (picked) text = picked;
+      if (picked && (startsHere || endsHere)) {
+        text = picked;
+        if (!(startsHere && endsHere)) attachKind = false;
+      }
     }
     e.dataTransfer.setData("text/plain", text);
-    e.dataTransfer.setData(
-      DRAG_MIME,
-      JSON.stringify({ sourceShapeIds, text, kind }),
-    );
+    const payload: { sourceShapeIds: string[]; text: string; kind?: typeof kind } = {
+      sourceShapeIds,
+      text,
+    };
+    if (attachKind) payload.kind = kind;
+    e.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload));
     e.dataTransfer.effectAllowed = "copy";
   });
   return span;

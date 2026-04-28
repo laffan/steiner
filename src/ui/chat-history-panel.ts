@@ -19,6 +19,9 @@ interface Term {
   /** Paired definition emitted directly after the term, if any. */
   definition?: string;
   sourceShapeId: string;
+  /** Snapshot of the source shape's text, used when the shape no longer
+   *  exists on the canvas. */
+  sourceText?: string;
   chatId: string;
   firstSeen: string;
 }
@@ -371,8 +374,11 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
   }
 
   function makeTermRow(t: Term): HTMLElement {
-    const sourceText = opts.getShapeText(t.sourceShapeId);
-    const sourcePreview = sourceText.trim().slice(0, 40) || "(empty note)";
+    // Same fallback chain as makeChatRow: live text → snapshot → empty.
+    const liveText = opts.getShapeText(t.sourceShapeId);
+    const sourceText = liveText.trim() || (t.sourceText ?? "").trim();
+    const sourcePreview = sourceText.slice(0, 40) || "(empty note)";
+    const sourceExists = liveText.trim().length > 0;
     const dragText = t.definition
       ? `**${t.text}** : ${t.definition}`
       : t.text;
@@ -413,7 +419,7 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
     });
     chip.addEventListener("click", (e) => {
       e.stopPropagation();
-      opts.onFocusShape(t.sourceShapeId);
+      if (sourceExists) opts.onFocusShape(t.sourceShapeId);
     });
 
     const children: HTMLElement[] = [chip];
@@ -461,8 +467,13 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
   }
 
   function makeChatRow(r: ChatRecord): HTMLElement {
-    const sourceText = opts.getShapeText(r.shapeId);
-    const sourcePreview = sourceText.trim().slice(0, 60) || "(empty note)";
+    // Prefer the live shape text (lets the user see edits propagate); fall
+    // back to the snapshot captured at chat-creation time when the source
+    // shape has been deleted.
+    const liveText = opts.getShapeText(r.shapeId);
+    const sourceText = liveText.trim() || (r.chat.source_text ?? "").trim();
+    const sourcePreview = sourceText.slice(0, 60) || "(empty note)";
+    const sourceExists = liveText.trim().length > 0;
     const open = expanded.has(r.chat.id);
 
     const headerLabel = h("button", {
@@ -471,9 +482,11 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
         textAlign: "left",
         background: "transparent",
         border: "none",
-        cursor: "pointer",
+        cursor: sourceExists ? "pointer" : "default",
         padding: "0",
-        color: "#1a3d80",
+        // Dim the link styling once the source is gone — it's no longer a
+        // jump target, just a header.
+        color: sourceExists ? "#1a3d80" : "#555",
         fontSize: "12px",
         fontWeight: "500",
         whiteSpace: "nowrap",
@@ -481,11 +494,13 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
         textOverflow: "ellipsis",
         fontFamily: "inherit",
       },
-      title: "Click to focus the source note on the canvas",
+      title: sourceExists
+        ? "Click to focus the source note on the canvas"
+        : "Source note has been deleted",
       children: [`↦ ${sourcePreview}`],
       onClick: (e: Event) => {
         e.stopPropagation();
-        opts.onFocusShape(r.shapeId);
+        if (sourceExists) opts.onFocusShape(r.shapeId);
       },
     });
 
@@ -733,6 +748,7 @@ function extractTerms(chatMap: Record<string, ShapeChat[]>): Term[] {
             text,
             definition,
             sourceShapeId: shapeId,
+            sourceText: chat.source_text,
             chatId: chat.id,
             firstSeen: chat.created_at,
           });

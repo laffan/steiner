@@ -1,5 +1,4 @@
 import type { DrawingState } from "../state";
-import { COLOR_PALETTE, BACKGROUND_COLORS, TEXT_COLORS } from "../types";
 import { canvasToScreen, computePocketLayout, getShapeBounds } from "../utils";
 import { h, clearChildren } from "./dom-helpers";
 import { icon } from "./icons";
@@ -39,30 +38,6 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
       style: { width: "28px", height: "28px", border: "none", borderRadius: "6px", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: theme.foreground },
       children: [icon(iconName, 18)],
       onClick,
-    });
-  }
-
-  function makePalette(colors: readonly string[], onSelect: (c: string) => void): HTMLElement {
-    const theme = state.theme;
-    return h("div", {
-      style: { position: "absolute", top: "-36px", left: "50%", transform: "translateX(-50%)", display: "flex", gap: "4px", padding: "6px 8px", background: theme.uiBackground, borderRadius: "8px", boxShadow: "0 2px 8px rgba(0,0,0,0.15)", border: `1px solid ${theme.uiBorder}`, zIndex: "300" },
-      children: colors.map((c) => {
-        if (c === "reset") {
-          const btn = h("button", {
-            title: "Reset",
-            style: { width: "14px", height: "14px", borderRadius: "50%", border: "1px solid #ccc", background: "#fff", cursor: "pointer", padding: "0", position: "relative" },
-            onClick: () => onSelect(c),
-          });
-          const slash = h("span", { style: { position: "absolute", top: "50%", left: "-1px", width: "14px", height: "1px", background: "red", transform: "rotate(45deg)", transformOrigin: "center" } });
-          btn.appendChild(slash);
-          return btn;
-        }
-        return h("button", {
-          title: c,
-          style: { width: "14px", height: "14px", borderRadius: "50%", border: "none", background: COLOR_PALETTE[c] || "#ccc", cursor: "pointer", padding: "0" },
-          onClick: () => onSelect(c),
-        });
-      }),
     });
   }
 
@@ -119,6 +94,28 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
         whiteSpace: "nowrap",
       },
     });
+    // "No style" first — clears any previously applied color + background
+    // back to the canvas defaults.
+    const noStyle = h("button", {
+      title: "Clear term style",
+      style: {
+        padding: "3px 10px",
+        border: "1px dashed #bbb",
+        borderRadius: "10px",
+        background: "transparent",
+        color: "#444",
+        fontSize: "11px",
+        fontWeight: "500",
+        cursor: "pointer",
+        fontFamily: "inherit",
+      },
+      children: ["No style"],
+      onClick: () => {
+        state.applyTextStyle("#000000", undefined);
+        closePopup();
+      },
+    });
+    panel.appendChild(noStyle);
     for (const { kind, label } of TERM_STYLE_PRESETS) {
       const styleSpec = HIGHLIGHT_STYLE[kind];
       const bg = (styleSpec.background as string) || "#eee";
@@ -243,8 +240,6 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
 
     const hasText = selected.some((s) => s.type === "text");
     const hasImage = selected.some((s) => s.type === "image");
-    const hasColorable = selected.some((s) => s.type === "text");
-    const hasBgable = selected.some((s) => s.type === "text" || s.type === "drag-area");
     const multiSelect = selected.length > 1;
 
     if (multiSelect) {
@@ -308,35 +303,10 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
       }));
     }
 
-    if (hasColorable) {
-      const wrapper = h("div", { style: { position: "relative" } });
-      wrapper.appendChild(makeIconBtn("text-color", "Text color", () => {
-        togglePopup("color", wrapper, () => makePalette(TEXT_COLORS, (c) => {
-          state.changeSelectedColor(c === "reset" ? "black" : c);
-          closePopup();
-        }));
-      }));
-      container.appendChild(wrapper);
-      if (savedPopup === "color") togglePopup("color", wrapper, () => makePalette(TEXT_COLORS, (c) => {
-        state.changeSelectedColor(c === "reset" ? "black" : c);
-        closePopup();
-      }));
-    }
-
-    if (hasBgable) {
-      const wrapper = h("div", { style: { position: "relative" } });
-      wrapper.appendChild(makeIconBtn("background-color", "Background", () => {
-        togglePopup("bg", wrapper, () => makePalette(BACKGROUND_COLORS, (c) => {
-          state.changeSelectedBackground(c);
-          closePopup();
-        }));
-      }));
-      container.appendChild(wrapper);
-      if (savedPopup === "bg") togglePopup("bg", wrapper, () => makePalette(BACKGROUND_COLORS, (c) => {
-        state.changeSelectedBackground(c);
-        closePopup();
-      }));
-    }
+    // Manual text-color and background-color buttons are intentionally
+    // omitted — styling for now flows through the term-style presets
+    // popup below. (state.changeSelectedColor / changeSelectedBackground
+    // are still available for keyboard shortcuts and programmatic use.)
 
     if (hasText) {
       const wrapper = h("div", { style: { position: "relative" } });

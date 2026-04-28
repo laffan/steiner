@@ -277,10 +277,18 @@ async function boot() {
     for (const shapeId of sourceShapeIds) {
       const list = shapeChats[shapeId] ? shapeChats[shapeId].slice() : [];
       const existing = list.findIndex((c) => c.id === chatId);
+      const sourceShape = canvasHost.findShape(shapeId);
+      const sourceText =
+        sourceShape && sourceShape.type === "text"
+          ? (sourceShape as { text: string }).text
+          : existing >= 0
+            ? list[existing].source_text
+            : undefined;
       const entry: ShapeChat = {
         id: chatId,
         created_at: existing >= 0 ? list[existing].created_at : now,
         messages: messages.slice(),
+        source_text: sourceText,
       };
       if (existing >= 0) list[existing] = entry;
       else list.push(entry);
@@ -303,11 +311,9 @@ async function boot() {
     if (!activeSession) return;
     canvasHost.flushPendingSave();
     const snap = canvasHost.snapshot();
-    // Drop chat history for shapes that no longer exist on the canvas.
-    const liveIds = new Set(snap.shapes.map((s) => s.id));
-    for (const id of Object.keys(shapeChats)) {
-      if (!liveIds.has(id)) delete shapeChats[id];
-    }
+    // Chats are kept even when their source shape is deleted — the chat
+    // row falls back to its captured source_text snapshot for display, so
+    // the user doesn't lose research notes by deleting a sticky.
     await api.saveSessionCanvas(activeSession.id, snapToBackend(snap, shapeChats, transcripts));
   }
 
