@@ -338,6 +338,15 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
       }
     }
 
+    const tidyableIds = selected
+      .filter((s) => s.type === "text" && state.flowchart.childrenOf(s.id).length > 0)
+      .map((s) => s.id);
+    if (tidyableIds.length > 0) {
+      container.appendChild(makeIconBtn("tidy", "Tidy subtree", () => {
+        for (const id of tidyableIds) state.tidySubtree(id);
+      }));
+    }
+
     container.appendChild(makeIconBtn("trash", "Delete", () => state.deleteSelected()));
 
     // Inline image rename

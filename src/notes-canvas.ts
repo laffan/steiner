@@ -7,7 +7,6 @@ import { createSelectionToolbar } from "./ui/selection-toolbar";
 import { createShelfPanel } from "./ui/shelf-panel";
 import { createTextEditor } from "./ui/text-editor";
 import { createBrainstormInput } from "./ui/brainstorm-input";
-import { createTidyOverlay } from "./ui/tidy-overlay";
 import { createStatusBar } from "./ui/status-bar";
 import { createSettingsPanel } from "./ui/settings-panel";
 import { createFilePanel } from "./ui/file-panel";
@@ -96,7 +95,6 @@ export class NotesCanvas {
       },
     };
 
-    container.appendChild(createTidyOverlay(this.state));
     container.appendChild(createSelectionToolbar(this.state, () => this._moveToShelf()));
     container.appendChild(createTextEditor(this.state));
     container.appendChild(createBrainstormInput(this.state));
