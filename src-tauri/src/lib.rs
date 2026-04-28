@@ -7,6 +7,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 #[cfg(desktop)]
 use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WindowEvent};
+#[cfg(desktop)]
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl};
 use uuid::Uuid;
 
@@ -38,7 +40,7 @@ struct BrowserKind {
 const BROWSERS: &[BrowserKind] = &[
     BrowserKind {
         label: "chat",
-        home: "https://claude.ai/",
+        home: "https://claude.ai/recents",
         allowed_prefixes: &["https://claude.ai", "https://www.claude.ai"],
     },
     BrowserKind {
@@ -1000,6 +1002,103 @@ fn build_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// Install a desktop menu where Undo/Redo are *custom* menu items (not the
+/// `PredefinedMenuItem::undo/redo` ones) so their accelerators reach our
+/// frontend via `menu:undo` / `menu:redo` events. The predefined items
+/// dispatch system "undo:" / "redo:" to the focused responder (the
+/// WKWebView's text-input undo manager), which has nothing to do with the
+/// canvas state.
+#[cfg(desktop)]
+fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
+    let pkg = &app.package_info().name;
+
+    // App submenu (macOS only convention; harmless to include the same
+    // structure on other desktops — Tauri ignores the app-name submenu off
+    // macOS).
+    let about = PredefinedMenuItem::about(
+        app,
+        Some(&format!("About {}", pkg)),
+        Some(AboutMetadata::default()),
+    )?;
+    let services = PredefinedMenuItem::services(app, None)?;
+    let hide = PredefinedMenuItem::hide(app, None)?;
+    let hide_others = PredefinedMenuItem::hide_others(app, None)?;
+    let show_all = PredefinedMenuItem::show_all(app, None)?;
+    let quit = PredefinedMenuItem::quit(app, None)?;
+    let app_submenu = Submenu::with_items(
+        app,
+        pkg,
+        true,
+        &[
+            &about,
+            &PredefinedMenuItem::separator(app)?,
+            &services,
+            &PredefinedMenuItem::separator(app)?,
+            &hide,
+            &hide_others,
+            &show_all,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    // Edit submenu: custom Undo/Redo + system Cut/Copy/Paste/SelectAll.
+    let undo = MenuItem::with_id(app, "menu:undo", "Undo", true, Some("CmdOrCtrl+Z"))?;
+    let redo = MenuItem::with_id(
+        app,
+        "menu:redo",
+        "Redo",
+        true,
+        Some("Shift+CmdOrCtrl+Z"),
+    )?;
+    let cut = PredefinedMenuItem::cut(app, None)?;
+    let copy = PredefinedMenuItem::copy(app, None)?;
+    let paste = PredefinedMenuItem::paste(app, None)?;
+    let select_all = PredefinedMenuItem::select_all(app, None)?;
+    let edit_submenu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &undo,
+            &redo,
+            &PredefinedMenuItem::separator(app)?,
+            &cut,
+            &copy,
+            &paste,
+            &select_all,
+        ],
+    )?;
+
+    // Window submenu — minimize / fullscreen / close are useful on macOS.
+    let minimize = PredefinedMenuItem::minimize(app, None)?;
+    let fullscreen = PredefinedMenuItem::fullscreen(app, None)?;
+    let close_window = PredefinedMenuItem::close_window(app, None)?;
+    let window_submenu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[&minimize, &fullscreen, &PredefinedMenuItem::separator(app)?, &close_window],
+    )?;
+
+    let menu = Menu::with_items(app, &[&app_submenu, &edit_submenu, &window_submenu])?;
+    app.set_menu(menu)?;
+
+    let app_for_menu = app.clone();
+    app.on_menu_event(move |_app, event| {
+        match event.id().as_ref() {
+            "menu:undo" => {
+                let _ = app_for_menu.emit_to(CANVAS_LABEL, "menu:undo", ());
+            }
+            "menu:redo" => {
+                let _ = app_for_menu.emit_to(CANVAS_LABEL, "menu:redo", ());
+            }
+            _ => {}
+        }
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -1084,6 +1183,13 @@ pub fn run() {
                     let _ = app_for_deep.emit("steiner://deep-link", &urls);
                 });
             }
+
+            // Build a custom application menu so Edit > Undo / Redo emit
+            // events to our frontend instead of dispatching the system
+            // "undo:" / "redo:" responder messages — those go to the
+            // WKWebView's text undo manager, not to our canvas state.
+            #[cfg(desktop)]
+            install_app_menu(app.handle())?;
 
             build_window(app)?;
             Ok(())

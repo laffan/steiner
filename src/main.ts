@@ -172,6 +172,13 @@ async function boot() {
     sessions.reload();
   });
 
+  // Native Edit > Undo / Redo menu items emit these events instead of
+  // dispatching the system "undo:" command (which goes to the WKWebView's
+  // text-field undo manager, not our canvas). Fall back to the JS keydown
+  // handler is unaffected for non-macOS contexts.
+  void listen("menu:undo", () => canvasHost.undo());
+  void listen("menu:redo", () => canvasHost.redo());
+
   // Flush any pending canvas save when the window/tab is hidden.
   window.addEventListener("beforeunload", () => canvasHost.flushPendingSave());
   document.addEventListener("visibilitychange", () => {

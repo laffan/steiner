@@ -43,7 +43,7 @@ type StateKey = "shapes" | "selectedIds" | "tool" | "color"
 export class DrawingState extends EventTarget {
   shapes: Shape[] = [];
   selectedIds: Set<string> = new Set();
-  tool: Tool = "text";
+  tool: Tool = "select";
   color = "#000000";
   fontSize = 18;
   camera: Camera = { x: 0, y: 0, zoom: 1 };

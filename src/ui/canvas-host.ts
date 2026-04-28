@@ -126,5 +126,8 @@ export function createCanvasHost(opts: Options) {
     return dataUrl;
   }
 
-  return { el: stage, load, snapshot, flushPendingSave, findShape, focusShape, snapToPng };
+  function undo() { canvas.state.undo(); }
+  function redo() { canvas.state.redo(); }
+
+  return { el: stage, load, snapshot, flushPendingSave, findShape, focusShape, snapToPng, undo, redo };
 }
