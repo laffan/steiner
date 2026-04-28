@@ -133,9 +133,7 @@ export function createSidebar(opts: Options): Sidebar {
     style: {
       position: "fixed",
       top: "12px",
-      // Clear the canvas's right-edge shelf grip (24px wide flush right)
-      // by inset of ~44px so the two controls don't overlap.
-      right: "44px",
+      left: "12px",
       width: "32px",
       height: "32px",
       border: "1px solid #ddd",
