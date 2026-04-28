@@ -26,6 +26,13 @@
 //   // On node deletion:
 //   flow.removeNode(deletedId);
 //
+//   // Tidy a subtree (anchors root, repositions descendants):
+//   const layout = flow.tidy(rootId, shapes);
+//   for (const [id, tl] of layout) {
+//     const old = getShapeBounds(shapes.find((s) => s.id === id)!);
+//     applyPositionDelta(id, tl.minX - old.minX, tl.minY - old.minY);
+//   }
+//
 //   // Persistence:
 //   const data = flow.serialize();
 //   flow.deserialize(loadedData);
@@ -56,6 +63,10 @@ export interface FlowchartConfig<S extends FlowNode> {
   gapX?: number;
   /** Vertical gap between siblings stacked under the parent. */
   gapY?: number;
+  /** Horizontal parent→child gap used by `tidy`. */
+  tidyGapX?: number;
+  /** Vertical sibling gap used by `tidy`. */
+  tidyGapY?: number;
   /** Stroke color for the arrows. */
   arrowColor?: string;
   /** Arrow line width (canvas units). */
@@ -69,6 +80,8 @@ interface ResolvedConfig<S extends FlowNode> {
   isFlowable: (node: S) => boolean;
   gapX: number;
   gapY: number;
+  tidyGapX: number;
+  tidyGapY: number;
   arrowColor: string;
   arrowWidth: number;
   arrowHeadSize: number;
@@ -84,6 +97,8 @@ export class FlowchartLayer<S extends FlowNode> {
       isFlowable: config.isFlowable ?? (() => true),
       gapX: config.gapX ?? 60,
       gapY: config.gapY ?? 16,
+      tidyGapX: config.tidyGapX ?? 150,
+      tidyGapY: config.tidyGapY ?? 25,
       arrowColor: config.arrowColor ?? "#666",
       arrowWidth: config.arrowWidth ?? 1.5,
       arrowHeadSize: config.arrowHeadSize ?? 11,
@@ -273,6 +288,138 @@ export class FlowchartLayer<S extends FlowNode> {
       minX: tb.maxX + this.cfg.gapX,
       minY: baseY,
     };
+  }
+
+  // --- Tidy ---
+
+  /**
+   * Re-layout the subtree rooted at `rootId`. The root stays anchored at its
+   * current top-left; every descendant is repositioned so that:
+   *   - Each child's left edge sits `tidyGapX` past its parent's right edge.
+   *   - Sibling subtrees are stacked vertically with `tidyGapY` between their
+   *     bounding boxes — which guarantees no overlap regardless of how deep
+   *     or wide individual subtrees grow, since each subtree occupies a
+   *     disjoint horizontal band relative to its siblings.
+   *   - Each parent is vertically centered against the block of its children.
+   *
+   * Nodes can be any size at any level; sibling stacking uses the full
+   * subtree bounding box (not just the child node's own bounds) so that a
+   * deep child subtree can't collide with a shallow sibling beside it.
+   *
+   * Returns a Map<id, { minX, minY }> giving the new top-left of the root
+   * and every descendant. Empty if `rootId` isn't in `shapes`. The caller
+   * applies the move via the same delta pattern as `tryConnect`:
+   *
+   *   for (const [id, tl] of layout) {
+   *     const old = getBounds(byId.get(id)!);
+   *     translate(id, tl.minX - old.minX, tl.minY - old.minY);
+   *   }
+   *
+   * Per-call gap overrides are accepted via `opts`.
+   */
+  tidy(
+    rootId: string,
+    shapes: S[],
+    opts?: { tidyGapX?: number; tidyGapY?: number },
+  ): Map<string, { minX: number; minY: number }> {
+    const out = new Map<string, { minX: number; minY: number }>();
+    const byId = new Map<string, S>();
+    for (const s of shapes) byId.set(s.id, s);
+    const root = byId.get(rootId);
+    if (!root) return out;
+
+    const gapX = opts?.tidyGapX ?? this.cfg.tidyGapX;
+    const gapY = opts?.tidyGapY ?? this.cfg.tidyGapY;
+
+    // Defensive cycle guard: even though tryConnect/addEdge enforce a tree,
+    // bad data could yield cycles and this recursion has no other backstop.
+    const visited = new Set<string>();
+
+    // Recursively assign each node a top-left (minX, minY) in a coordinate
+    // system local to the subtree (subtree's own top-left == (0, 0)).
+    // Returns the subtree's bounding-box size.
+    const layout = (id: string): { width: number; height: number } => {
+      if (visited.has(id)) return { width: 0, height: 0 };
+      visited.add(id);
+      const node = byId.get(id);
+      if (!node) return { width: 0, height: 0 };
+      const nb = this.cfg.getBounds(node);
+      const nw = nb.maxX - nb.minX;
+      const nh = nb.maxY - nb.minY;
+
+      const childIds = this.childrenOf(id).filter((c) => byId.has(c) && !visited.has(c));
+      if (childIds.length === 0) {
+        out.set(id, { minX: 0, minY: 0 });
+        return { width: nw, height: nh };
+      }
+
+      const childSizes: { id: string; width: number; height: number }[] = [];
+      for (const cid of childIds) {
+        childSizes.push({ id: cid, ...layout(cid) });
+      }
+
+      // Combined height of children stacked with gapY between subtree boxes.
+      let stackedH = 0;
+      for (let i = 0; i < childSizes.length; i++) {
+        stackedH += childSizes[i].height;
+        if (i < childSizes.length - 1) stackedH += gapY;
+      }
+      // The maximum child subtree width (children may have different depths).
+      let maxChildW = 0;
+      for (const c of childSizes) {
+        if (c.width > maxChildW) maxChildW = c.width;
+      }
+
+      const subtreeH = Math.max(nh, stackedH);
+      const subtreeW = nw + gapX + maxChildW;
+
+      // Place this node at left edge, centered vertically within the subtree.
+      out.set(id, { minX: 0, minY: (subtreeH - nh) / 2 });
+
+      // Place each child subtree to the right and stack them vertically,
+      // centered against the subtree's vertical span.
+      const childOffsetX = nw + gapX;
+      let cursorY = (subtreeH - stackedH) / 2;
+      for (const ch of childSizes) {
+        shiftSubtree(ch.id, childOffsetX, cursorY);
+        cursorY += ch.height + gapY;
+      }
+
+      return { width: subtreeW, height: subtreeH };
+    };
+
+    // Translate every position already assigned within the subtree of `id`.
+    const shiftSubtree = (id: string, dx: number, dy: number): void => {
+      const seen = new Set<string>();
+      const stack = [id];
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        const p = out.get(cur);
+        if (p) {
+          p.minX += dx;
+          p.minY += dy;
+        }
+        for (const c of this.childrenOf(cur)) {
+          if (byId.has(c)) stack.push(c);
+        }
+      }
+    };
+
+    layout(rootId);
+
+    // Anchor: shift the whole layout so the root keeps its current top-left.
+    const rootBounds = this.cfg.getBounds(root);
+    const rootRel = out.get(rootId);
+    if (!rootRel) return out;
+    const ox = rootBounds.minX - rootRel.minX;
+    const oy = rootBounds.minY - rootRel.minY;
+    for (const p of out.values()) {
+      p.minX += ox;
+      p.minY += oy;
+    }
+    return out;
   }
 
   // --- Rendering ---
