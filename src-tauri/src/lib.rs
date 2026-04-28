@@ -19,8 +19,44 @@ const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const WINDOW_LABEL: &str = "main";
 #[cfg(desktop)]
 const CANVAS_LABEL: &str = "canvas";
+
+/// Configuration for a sidebar browser tab — the webview label, the
+/// canonical home URL, and the list of host prefixes whose URLs we'll
+/// remember between launches.
 #[cfg(desktop)]
-const CHAT_LABEL: &str = "chat";
+struct BrowserKind {
+    /// Tauri webview label (e.g. "chat", "wiki").
+    label: &'static str,
+    /// Where we land if the user has no saved URL.
+    home: &'static str,
+    /// URL prefixes that count as "this site" for last-URL tracking.
+    /// Off-domain navigations (logins, redirects) are not persisted.
+    allowed_prefixes: &'static [&'static str],
+}
+
+#[cfg(desktop)]
+const BROWSERS: &[BrowserKind] = &[
+    BrowserKind {
+        label: "chat",
+        home: "https://claude.ai/",
+        allowed_prefixes: &["https://claude.ai", "https://www.claude.ai"],
+    },
+    BrowserKind {
+        label: "wiki",
+        home: "https://en.wikipedia.org/",
+        allowed_prefixes: &[
+            "https://wikipedia.org",
+            "https://www.wikipedia.org",
+            "https://en.wikipedia.org",
+            "https://en.m.wikipedia.org",
+        ],
+    },
+];
+
+#[cfg(desktop)]
+fn browser_kind(label: &str) -> Option<&'static BrowserKind> {
+    BROWSERS.iter().find(|b| b.label == label)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -88,14 +124,17 @@ pub struct Settings {
     pub dropbox_last_sync: Option<String>,
     #[serde(default)]
     pub last_claude_url: Option<String>,
+    #[serde(default)]
+    pub last_wiki_url: Option<String>,
 }
 
 pub struct AppState {
     pub current_stream: Mutex<Option<String>>, // session_id of in-flight stream
-    /// Set once the chat (claude.ai) child webview has been added to the
-    /// window. Subsequent show calls just reposition the existing webview.
+    /// Labels of sidebar browser webviews already added to the main window.
+    /// Keyed by `BrowserKind::label`. Subsequent show calls just reposition
+    /// the existing webview.
     #[cfg(desktop)]
-    pub chat_webview_created: Mutex<bool>,
+    pub created_browsers: Mutex<std::collections::HashSet<String>>,
 }
 
 // --- Path helpers ---
@@ -194,41 +233,58 @@ fn is_desktop() -> bool {
     cfg!(desktop)
 }
 
-#[tauri::command]
-fn get_last_claude_url(app: AppHandle) -> Option<String> {
-    read_settings(&app).last_claude_url
-}
-
-#[tauri::command]
-fn set_last_claude_url(app: AppHandle, url: String) -> Result<(), String> {
-    if !url.starts_with("https://claude.ai") && !url.starts_with("https://www.claude.ai") {
-        return Ok(());
-    }
-    let mut s = read_settings(&app);
-    if s.last_claude_url.as_deref() == Some(url.as_str()) {
-        return Ok(());
-    }
-    s.last_claude_url = Some(url);
-    write_settings(&app, &s)
-}
-
-// --- Chat (claude.ai) child webview ---
+// --- Sidebar browser child webviews ---
 //
-// Desktop only: a second WKWebView is parented under the main window and
-// positioned by the frontend to overlay the sidebar's "Chat" tab area. The
-// webview is created lazily on first show and then just repositioned on
-// subsequent calls. iOS has no equivalent — the Chat tab is hidden in the UI.
+// Desktop only: each browser tab in the sidebar (Chat = claude.ai, Wiki =
+// wikipedia.org) gets its own WKWebView parented under the main window and
+// positioned by the frontend to overlay the active tab's area. Webviews are
+// created lazily on first show and then just repositioned on subsequent
+// calls. iOS has no equivalent — those tabs are hidden in the UI.
 
 #[cfg(desktop)]
-fn ensure_chat_webview(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+fn last_url_for(s: &Settings, kind: &BrowserKind) -> Option<String> {
+    match kind.label {
+        "chat" => s.last_claude_url.clone(),
+        "wiki" => s.last_wiki_url.clone(),
+        _ => None,
+    }
+}
+
+#[cfg(desktop)]
+fn save_last_url_for(app: &AppHandle, kind: &BrowserKind, url: &str) -> Result<(), String> {
+    if !kind.allowed_prefixes.iter().any(|p| url.starts_with(p)) {
+        return Ok(());
+    }
+    let mut s = read_settings(app);
+    let slot = match kind.label {
+        "chat" => &mut s.last_claude_url,
+        "wiki" => &mut s.last_wiki_url,
+        _ => return Ok(()),
+    };
+    if slot.as_deref() == Some(url) {
+        return Ok(());
+    }
+    *slot = Some(url.to_string());
+    write_settings(app, &s)
+}
+
+#[cfg(desktop)]
+fn ensure_browser_webview(
+    app: &AppHandle,
+    kind: &'static BrowserKind,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
     let state = app
         .try_state::<AppState>()
         .ok_or_else(|| "AppState missing".to_string())?;
     let mut created = state
-        .chat_webview_created
+        .created_browsers
         .lock()
         .map_err(|e| e.to_string())?;
-    if *created {
+    if created.contains(kind.label) {
         return Ok(());
     }
 
@@ -236,41 +292,50 @@ fn ensure_chat_webview(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Resul
         .get_window(WINDOW_LABEL)
         .ok_or_else(|| "main window not found".to_string())?;
 
-    let initial_url = read_settings(app)
-        .last_claude_url
-        .filter(|u| u.starts_with("https://claude.ai") || u.starts_with("https://www.claude.ai"))
-        .unwrap_or_else(|| "https://claude.ai/".to_string());
+    let initial_url = last_url_for(&read_settings(app), kind)
+        .filter(|u| kind.allowed_prefixes.iter().any(|p| u.starts_with(p)))
+        .unwrap_or_else(|| kind.home.to_string());
 
-    let parsed_url: tauri::Url = initial_url.parse().unwrap_or_else(|_| {
-        "https://claude.ai/"
-            .parse()
-            .expect("static fallback URL parses")
-    });
+    let fallback = kind.home;
+    let parsed_url: tauri::Url = initial_url
+        .parse()
+        .unwrap_or_else(|_| fallback.parse().expect("static fallback URL parses"));
     let app_for_nav = app.clone();
-    let builder = WebviewBuilder::new(CHAT_LABEL, WebviewUrl::External(parsed_url))
-        .on_navigation(move |url| {
-        let s = url.to_string();
-        if s.starts_with("https://claude.ai") || s.starts_with("https://www.claude.ai") {
-            let _ = set_last_claude_url(app_for_nav.clone(), s);
-        }
-        true
-    });
+    let builder = WebviewBuilder::new(kind.label, WebviewUrl::External(parsed_url)).on_navigation(
+        move |url| {
+            let s = url.to_string();
+            let _ = save_last_url_for(&app_for_nav, kind, &s);
+            true
+        },
+    );
 
     window
-        .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w.max(1.0), h.max(1.0)))
+        .add_child(
+            builder,
+            LogicalPosition::new(x, y),
+            LogicalSize::new(w.max(1.0), h.max(1.0)),
+        )
         .map_err(|e| e.to_string())?;
 
-    *created = true;
+    created.insert(kind.label.to_string());
     Ok(())
 }
 
 #[cfg(desktop)]
 #[tauri::command]
-fn show_chat_webview(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
-    ensure_chat_webview(&app, x, y, w, h)?;
+fn show_browser_webview(
+    app: AppHandle,
+    kind: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    let bk = browser_kind(&kind).ok_or_else(|| format!("unknown browser kind: {}", kind))?;
+    ensure_browser_webview(&app, bk, x, y, w, h)?;
     let webview = app
-        .get_webview(CHAT_LABEL)
-        .ok_or_else(|| "chat webview not found".to_string())?;
+        .get_webview(bk.label)
+        .ok_or_else(|| format!("{} webview not found", bk.label))?;
     webview
         .set_position(LogicalPosition::new(x, y))
         .map_err(|e| e.to_string())?;
@@ -282,8 +347,9 @@ fn show_chat_webview(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(
 
 #[cfg(desktop)]
 #[tauri::command]
-fn hide_chat_webview(app: AppHandle) -> Result<(), String> {
-    if let Some(webview) = app.get_webview(CHAT_LABEL) {
+fn hide_browser_webview(app: AppHandle, kind: String) -> Result<(), String> {
+    let bk = browser_kind(&kind).ok_or_else(|| format!("unknown browser kind: {}", kind))?;
+    if let Some(webview) = app.get_webview(bk.label) {
         // Park offscreen at zero size; recreating/destroying webviews mid-run
         // is finicky, so we keep it alive and just hide it.
         webview
@@ -299,13 +365,13 @@ fn hide_chat_webview(app: AppHandle) -> Result<(), String> {
 // Mobile shims so the frontend can call the same commands on every platform.
 #[cfg(not(desktop))]
 #[tauri::command]
-fn show_chat_webview(_x: f64, _y: f64, _w: f64, _h: f64) -> Result<(), String> {
+fn show_browser_webview(_kind: String, _x: f64, _y: f64, _w: f64, _h: f64) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(not(desktop))]
 #[tauri::command]
-fn hide_chat_webview() -> Result<(), String> {
+fn hide_browser_webview(_kind: String) -> Result<(), String> {
     Ok(())
 }
 
@@ -930,7 +996,7 @@ pub fn run() {
         .manage(AppState {
             current_stream: Mutex::new(None),
             #[cfg(desktop)]
-            chat_webview_created: Mutex::new(false),
+            created_browsers: Mutex::new(std::collections::HashSet::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -938,10 +1004,8 @@ pub fn run() {
             set_ask_word_limit,
             set_ask_model,
             is_desktop,
-            get_last_claude_url,
-            set_last_claude_url,
-            show_chat_webview,
-            hide_chat_webview,
+            show_browser_webview,
+            hide_browser_webview,
             list_sessions,
             create_session,
             get_session,

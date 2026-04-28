@@ -7,7 +7,7 @@ import { createCanvasHost, type CanvasSnapshot } from "./ui/canvas-host";
 import { createAskModal } from "./ui/ask-modal";
 import { createChatHistoryPanel } from "./ui/chat-history-panel";
 import { showExportModal } from "./ui/export-modal";
-import { createSidebar, syncChatWebview } from "./ui/sidebar";
+import { createSidebar, syncBrowserWebview } from "./ui/sidebar";
 import { h } from "./ui/dom-helpers";
 
 type ShapeChats = Record<string, ShapeChat[]>;
@@ -47,7 +47,7 @@ async function boot() {
   const sidebar = createSidebar({
     sessionsContent: sessions.el,
     desktop: isDesktop,
-    onLayoutChange: () => scheduleChatSync(),
+    onLayoutChange: () => scheduleBrowserSync(),
   });
 
   const settings = createSettingsModal();
@@ -140,23 +140,23 @@ async function boot() {
   document.body.appendChild(settings.el);
   document.body.appendChild(askModal.el);
 
-  // Reposition / show / hide the native claude.ai child webview whenever the
-  // sidebar layout, the active tab, or the window itself changes. The
-  // requestAnimationFrame coalesces bursts (resize drags, etc.).
-  let chatSyncPending = false;
-  function scheduleChatSync() {
-    if (chatSyncPending) return;
-    chatSyncPending = true;
+  // Reposition / show / hide the active browser child webview (Chat or
+  // Wikipedia) whenever the sidebar layout, the active tab, or the window
+  // itself changes. requestAnimationFrame coalesces bursts (resize drags).
+  let browserSyncPending = false;
+  function scheduleBrowserSync() {
+    if (browserSyncPending) return;
+    browserSyncPending = true;
     requestAnimationFrame(() => {
-      chatSyncPending = false;
-      void syncChatWebview(sidebar.chatRect());
+      browserSyncPending = false;
+      void syncBrowserWebview(sidebar.browserRect());
     });
   }
-  window.addEventListener("resize", scheduleChatSync);
+  window.addEventListener("resize", scheduleBrowserSync);
   // Rust emits this after it relayouts the canvas webview on window resize.
-  void listen("window-resized", () => scheduleChatSync());
+  void listen("window-resized", () => scheduleBrowserSync());
   // Initial placement after the layout has been measured.
-  scheduleChatSync();
+  scheduleBrowserSync();
 
   // Hook the canvas selection toolbar reaches via `window`.
   const w = window as unknown as {

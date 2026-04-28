@@ -1,4 +1,4 @@
-import { api } from "../api";
+import { api, type BrowserKind } from "../api";
 import { h } from "./dom-helpers";
 
 const STORAGE_WIDTH = "steiner.sidebar.width";
@@ -8,28 +8,52 @@ const DEFAULT_WIDTH = 280;
 const MIN_WIDTH = 200;
 const MAX_WIDTH = 640;
 
-export type SidebarTab = "sessions" | "chat";
+export type SidebarTab = "sessions" | "chat" | "wiki";
+
+const BROWSER_TABS: BrowserKind[] = ["chat", "wiki"];
+
+interface TabSpec {
+  key: SidebarTab;
+  label: string;
+  /** When set, this tab hosts a native browser webview managed by Rust. */
+  browser?: BrowserKind;
+}
+
+const TABS: TabSpec[] = [
+  { key: "sessions", label: "Sessions" },
+  { key: "chat", label: "Chat", browser: "chat" },
+  { key: "wiki", label: "Wikipedia", browser: "wiki" },
+];
 
 interface Options {
   /** The Sessions tab body (built by createSessionsSidebar). */
   sessionsContent: HTMLElement;
-  /** True on desktop. iOS hides the Chat tab and never shows the webview. */
+  /** True on desktop. iOS hides the browser tabs and never shows a webview. */
   desktop: boolean;
   /** Called when the sidebar's geometry (width, collapsed, tab) changes. */
   onLayoutChange: () => void;
 }
 
+export interface BrowserRect {
+  kind: BrowserKind;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface Sidebar {
   el: HTMLElement;
-  /** Toggle button placed in the top-right of the canvas area. */
+  /** Toggle button placed to the right of the sidebar (or canvas left edge
+   *  when collapsed). */
   toggleEl: HTMLElement;
   /** True when the sidebar is fully collapsed (width 0). */
   isCollapsed(): boolean;
   /** Currently active tab. */
   activeTab(): SidebarTab;
-  /** Logical-pixel rect of the chat content area inside the window, or null
-   *  when the chat pane is not visible (collapsed, on Sessions tab, or iOS). */
-  chatRect(): { x: number; y: number; w: number; h: number } | null;
+  /** Logical-pixel rect of the active browser tab's content area, or null
+   *  when no browser tab is showing (collapsed, on Sessions tab, or iOS). */
+  browserRect(): BrowserRect | null;
 }
 
 export function createSidebar(opts: Options): Sidebar {
@@ -37,57 +61,59 @@ export function createSidebar(opts: Options): Sidebar {
   width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, width));
   let collapsed = readBool(STORAGE_COLLAPSED, false);
   let tab: SidebarTab = (localStorage.getItem(STORAGE_TAB) as SidebarTab) || "sessions";
-  if (!opts.desktop) tab = "sessions";
+  if (!opts.desktop && tab !== "sessions") tab = "sessions";
 
-  const chatHost = h("div", {
-    style: {
-      flex: "1",
-      minHeight: "0",
-      background: "#fafafa",
-      display: tab === "chat" ? "block" : "none",
-      // The actual claude.ai webview is a native child webview positioned
-      // over this div by the Rust backend. The placeholder is here so the
-      // rest of the layout reserves the right space and we can read the
-      // host's bounding rect to tell Rust where to put the webview.
-      position: "relative",
-    },
-  });
+  // One placeholder div per browser tab. The actual native webview is
+  // positioned over the placeholder by the Rust backend; the placeholder
+  // exists so we can read a bounding rect from layout.
+  const browserHosts: Record<BrowserKind, HTMLElement> = {
+    chat: makeBrowserHost(),
+    wiki: makeBrowserHost(),
+  };
 
   // Make sessions content track tab visibility too.
   opts.sessionsContent.style.display = tab === "sessions" ? "flex" : "none";
+  for (const k of BROWSER_TABS) {
+    browserHosts[k].style.display = tab === k ? "block" : "none";
+  }
 
-  const tabBtn = (label: string, key: SidebarTab): HTMLButtonElement =>
-    h("button", {
-      style: {
-        flex: "1",
-        padding: "10px 12px",
-        border: "none",
-        background: "transparent",
-        color: "#444",
-        fontSize: "13px",
-        fontWeight: "500",
-        cursor: "pointer",
-        borderTop: "2px solid transparent",
-        borderRadius: "0",
-      },
-      children: [label],
-      onClick: () => setTab(key),
-    }) as HTMLButtonElement;
-
-  const sessionsTab = tabBtn("Sessions", "sessions");
-  const chatTab = tabBtn("Chat", "chat");
-  if (!opts.desktop) chatTab.style.display = "none";
-
-  const tabs = h("div", {
+  const tabButtons: Record<SidebarTab, HTMLButtonElement> = {} as Record<
+    SidebarTab,
+    HTMLButtonElement
+  >;
+  const tabBar = h("div", {
     style: {
-      // Mobile only has the Sessions tab so the bar would be a meaningless
-      // single button — hide the whole strip there.
+      // Mobile only has the Sessions tab, so the strip would just be a
+      // single button — hide it entirely.
       display: opts.desktop ? "flex" : "none",
       borderTop: "1px solid #e5e5e5",
       background: "#f0f0f0",
     },
-    children: [sessionsTab, chatTab],
   });
+  for (const spec of TABS) {
+    const btn = h("button", {
+      style: {
+        flex: "1",
+        padding: "10px 8px",
+        border: "none",
+        background: "transparent",
+        color: "#444",
+        fontSize: "12px",
+        fontWeight: "500",
+        cursor: "pointer",
+        borderTop: "2px solid transparent",
+        borderRadius: "0",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      },
+      children: [spec.label],
+      onClick: () => setTab(spec.key),
+    }) as HTMLButtonElement;
+    if (!opts.desktop && spec.browser) btn.style.display = "none";
+    tabButtons[spec.key] = btn;
+    tabBar.appendChild(btn);
+  }
 
   const body = h("div", {
     style: {
@@ -96,7 +122,7 @@ export function createSidebar(opts: Options): Sidebar {
       flex: "1",
       minHeight: "0",
     },
-    children: [opts.sessionsContent, chatHost],
+    children: [opts.sessionsContent, browserHosts.chat, browserHosts.wiki],
   });
 
   const resizeHandle = h("div", {
@@ -126,15 +152,15 @@ export function createSidebar(opts: Options): Sidebar {
       overflow: "hidden",
       transition: "none",
     },
-    children: [body, tabs, resizeHandle],
+    children: [body, tabBar, resizeHandle],
   });
 
   const toggleEl = h("button", {
     style: {
-      // Anchored to the sidebar's right edge so the chat webview (a native
-      // view layered above the HTML) never covers it. When the sidebar
-      // resizes or collapses, applyWidth() updates `left` to slide the
-      // toggle along with it.
+      // Anchored to the sidebar's right edge so the browser webview (a
+      // native view layered above the HTML) never covers it. When the
+      // sidebar resizes or collapses, applyTogglePosition() updates `left`
+      // to slide the toggle along with it.
       position: "fixed",
       top: "12px",
       left: "12px",
@@ -160,24 +186,21 @@ export function createSidebar(opts: Options): Sidebar {
   applyTogglePosition();
 
   function renderToggleIcon() {
-    // Show a left-pointing arrow when expanded (click to collapse), right
-    // when collapsed.
     toggleEl.textContent = collapsed ? "›" : "‹";
   }
 
   function applyTogglePosition() {
-    // Sit just outside the sidebar's right edge when expanded, or flush to
-    // the left edge of the canvas when collapsed.
+    // Sit ~30px past the sidebar's right edge (or the canvas's left edge
+    // when collapsed) so we clear the canvas-side chat-history-panel grip
+    // (24px wide, flush left).
     const offset = collapsed ? 0 : width;
-    toggleEl.style.left = `${offset + 12}px`;
+    toggleEl.style.left = `${offset + 30}px`;
   }
 
   function styleTabs() {
-    for (const [btn, key] of [
-      [sessionsTab, "sessions"],
-      [chatTab, "chat"],
-    ] as [HTMLButtonElement, SidebarTab][]) {
-      const active = key === tab;
+    for (const spec of TABS) {
+      const btn = tabButtons[spec.key];
+      const active = spec.key === tab;
       btn.style.background = active ? "#fafafa" : "transparent";
       btn.style.color = active ? "#0f0f0f" : "#666";
       btn.style.borderTop = active ? "2px solid #0f0f0f" : "2px solid transparent";
@@ -201,11 +224,15 @@ export function createSidebar(opts: Options): Sidebar {
   }
 
   function setTab(next: SidebarTab) {
-    if (!opts.desktop && next === "chat") return;
+    const spec = TABS.find((t) => t.key === next);
+    if (!spec) return;
+    if (!opts.desktop && spec.browser) return;
     tab = next;
     localStorage.setItem(STORAGE_TAB, next);
     opts.sessionsContent.style.display = next === "sessions" ? "flex" : "none";
-    chatHost.style.display = next === "chat" ? "block" : "none";
+    for (const k of BROWSER_TABS) {
+      browserHosts[k].style.display = next === k ? "block" : "none";
+    }
     styleTabs();
     opts.onLayoutChange();
   }
@@ -237,14 +264,17 @@ export function createSidebar(opts: Options): Sidebar {
     resizeHandle.addEventListener("pointerup", up);
   });
 
-  function chatRect(): { x: number; y: number; w: number; h: number } | null {
-    if (!opts.desktop || collapsed || tab !== "chat") return null;
-    const r = chatHost.getBoundingClientRect();
-    // Leave ~4px on the right so the resize handle stays clickable above the
-    // native webview.
+  function browserRect(): BrowserRect | null {
+    if (!opts.desktop || collapsed) return null;
+    const spec = TABS.find((t) => t.key === tab);
+    if (!spec?.browser) return null;
+    const host = browserHosts[spec.browser];
+    const r = host.getBoundingClientRect();
+    // Leave ~4px on the right so the sidebar resize handle stays clickable
+    // above the native webview.
     const w = Math.max(0, r.width - 4);
     if (w <= 0 || r.height <= 0) return null;
-    return { x: r.left, y: r.top, w, h: r.height };
+    return { kind: spec.browser, x: r.left, y: r.top, w, h: r.height };
   }
 
   return {
@@ -252,8 +282,20 @@ export function createSidebar(opts: Options): Sidebar {
     toggleEl,
     isCollapsed: () => collapsed,
     activeTab: () => tab,
-    chatRect,
+    browserRect,
   };
+}
+
+function makeBrowserHost(): HTMLElement {
+  return h("div", {
+    style: {
+      flex: "1",
+      minHeight: "0",
+      background: "#fafafa",
+      display: "none",
+      position: "relative",
+    },
+  });
 }
 
 function readNum(key: string, fallback: number): number {
@@ -269,24 +311,28 @@ function readBool(key: string, fallback: boolean): boolean {
   return raw === "1";
 }
 
-let chatVisible = false;
+// Track which browser webviews are currently shown so we can call hide for
+// the others when the user switches tabs (only one can overlay the sidebar
+// at a time).
+const visibleBrowsers = new Set<BrowserKind>();
 
-export async function syncChatWebview(rect: ReturnType<Sidebar["chatRect"]>): Promise<void> {
-  if (!rect) {
-    if (chatVisible) {
-      chatVisible = false;
-      try {
-        await api.hideChatWebview();
-      } catch (e) {
-        console.warn("[steiner] hideChatWebview failed", e);
-      }
+export async function syncBrowserWebview(rect: BrowserRect | null): Promise<void> {
+  // Hide every browser that isn't the currently-visible one.
+  const keep: BrowserKind | null = rect?.kind ?? null;
+  for (const kind of [...visibleBrowsers]) {
+    if (kind === keep) continue;
+    visibleBrowsers.delete(kind);
+    try {
+      await api.hideBrowserWebview(kind);
+    } catch (e) {
+      console.warn(`[steiner] hideBrowserWebview(${kind}) failed`, e);
     }
-    return;
   }
+  if (!rect) return;
   try {
-    await api.showChatWebview(rect.x, rect.y, rect.w, rect.h);
-    chatVisible = true;
+    await api.showBrowserWebview(rect.kind, rect.x, rect.y, rect.w, rect.h);
+    visibleBrowsers.add(rect.kind);
   } catch (e) {
-    console.warn("[steiner] showChatWebview failed", e);
+    console.warn(`[steiner] showBrowserWebview(${rect.kind}) failed`, e);
   }
 }

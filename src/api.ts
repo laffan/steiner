@@ -70,7 +70,11 @@ export interface Settings {
   dropbox_account_email: string | null;
   dropbox_last_sync: string | null;
   last_claude_url: string | null;
+  last_wiki_url: string | null;
 }
+
+/** Sidebar browser kinds — must match BROWSERS table in src-tauri/src/lib.rs. */
+export type BrowserKind = "chat" | "wiki";
 
 export interface DropboxStatus {
   linked: boolean;
@@ -101,9 +105,15 @@ export const api = {
     invoke<void>("set_ask_word_limit", { limit }),
   setAskModel: (model: string) => invoke<void>("set_ask_model", { model }),
   isDesktop: () => invoke<boolean>("is_desktop"),
-  showChatWebview: (x: number, y: number, w: number, h: number) =>
-    invoke<void>("show_chat_webview", { x, y, w, h }),
-  hideChatWebview: () => invoke<void>("hide_chat_webview"),
+  showBrowserWebview: (
+    kind: BrowserKind,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ) => invoke<void>("show_browser_webview", { kind, x, y, w, h }),
+  hideBrowserWebview: (kind: BrowserKind) =>
+    invoke<void>("hide_browser_webview", { kind }),
 
   listSessions: () => invoke<SessionMeta[]>("list_sessions"),
   createSession: (title?: string, model?: string) =>
