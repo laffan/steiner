@@ -72,9 +72,7 @@ export function createSessionsSidebar(opts: Options) {
 
   const header = h("div", {
     style: {
-      // Top inset clears the floating sidebar-toggle button (32px tall +
-      // 12px from the top edge) sitting in the upper-left corner.
-      padding: "56px 12px 12px",
+      padding: "12px",
       borderBottom: "1px solid #e5e5e5",
       display: "flex",
       flexDirection: "column",

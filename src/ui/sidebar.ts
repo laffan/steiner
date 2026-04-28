@@ -131,6 +131,10 @@ export function createSidebar(opts: Options): Sidebar {
 
   const toggleEl = h("button", {
     style: {
+      // Anchored to the sidebar's right edge so the chat webview (a native
+      // view layered above the HTML) never covers it. When the sidebar
+      // resizes or collapses, applyWidth() updates `left` to slide the
+      // toggle along with it.
       position: "fixed",
       top: "12px",
       left: "12px",
@@ -153,11 +157,19 @@ export function createSidebar(opts: Options): Sidebar {
     onClick: () => setCollapsed(!collapsed),
   });
   renderToggleIcon();
+  applyTogglePosition();
 
   function renderToggleIcon() {
     // Show a left-pointing arrow when expanded (click to collapse), right
     // when collapsed.
     toggleEl.textContent = collapsed ? "›" : "‹";
+  }
+
+  function applyTogglePosition() {
+    // Sit just outside the sidebar's right edge when expanded, or flush to
+    // the left edge of the canvas when collapsed.
+    const offset = collapsed ? 0 : width;
+    toggleEl.style.left = `${offset + 12}px`;
   }
 
   function styleTabs() {
@@ -178,6 +190,7 @@ export function createSidebar(opts: Options): Sidebar {
     aside.style.minWidth = collapsed ? "0px" : `${width}px`;
     aside.style.borderRight = collapsed ? "none" : "1px solid #e5e5e5";
     renderToggleIcon();
+    applyTogglePosition();
   }
 
   function setCollapsed(next: boolean) {
