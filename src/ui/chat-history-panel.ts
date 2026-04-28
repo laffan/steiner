@@ -514,7 +514,11 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
             background: "#fff",
           },
         });
+        // Skip user-role messages: the seed prompt just repeats the source
+        // text shown in the row header, and there's no follow-up UI anymore
+        // (the modal is gone). Only the assistant response carries new info.
         for (const m of r.chat.messages) {
+          if (m.role !== "assistant") continue;
           body.appendChild(
             makeChatBubble({
               role: m.role,
@@ -590,6 +594,7 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
     buildBody: () => HTMLElement;
   }): HTMLElement {
     const wrap = h("div", {
+      attrs: { "data-chat-id": args.id },
       style: {
         background: "#fff",
         border: "1px solid #e5e5e5",
@@ -657,7 +662,34 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
     return wrap;
   }
 
-  return { el: panel, rebuild };
+  /** Open the panel, switch to History, expand the given chat, and scroll
+   *  it into view. Used by the canvas's "Ask Claude" button to surface the
+   *  newly-completed request without a separate modal. */
+  function openExpanded(chatId: string) {
+    isOpen = true;
+    activeTab = "history";
+    expanded.add(chatId);
+    rebuild();
+    // After rebuild, scroll the row into view. data-chat-id is set on the
+    // collapsible item below.
+    requestAnimationFrame(() => {
+      const row = content.querySelector<HTMLElement>(
+        `[data-chat-id="${cssEscape(chatId)}"]`,
+      );
+      if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }
+
+  return { el: panel, rebuild, openExpanded };
+}
+
+function cssEscape(s: string): string {
+  // Browsers ship CSS.escape; fall back to a permissive escape for the
+  // characters our chat IDs actually contain (alphanumerics + _).
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
 
 function extractTerms(chatMap: Record<string, ShapeChat[]>): Term[] {

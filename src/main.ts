@@ -1,10 +1,20 @@
 import "./index.css";
 import { listen } from "@tauri-apps/api/event";
-import { api, DEFAULT_MODEL, type Session, type ShapeChat, type TranscriptEntry } from "./api";
+import {
+  api,
+  DEFAULT_ASK_WORD_LIMIT,
+  DEFAULT_MODEL,
+  DEFAULT_PROMPT_PREFIX,
+  DEFAULT_PROMPT_SUFFIX,
+  type ChatMessage,
+  type Segment,
+  type Session,
+  type ShapeChat,
+  type TranscriptEntry,
+} from "./api";
 import { createSessionsSidebar } from "./ui/sessions-sidebar";
 import { createSettingsModal } from "./ui/settings-modal";
 import { createCanvasHost, type CanvasSnapshot } from "./ui/canvas-host";
-import { createAskModal } from "./ui/ask-modal";
 import { createChatHistoryPanel } from "./ui/chat-history-panel";
 import { showExportModal } from "./ui/export-modal";
 import { createSidebar, syncBrowserWebview } from "./ui/sidebar";
@@ -56,29 +66,6 @@ async function boot() {
     onChange: async (snap) => {
       if (!activeSession) return;
       await api.saveSessionCanvas(activeSession.id, snapToBackend(snap, shapeChats, transcripts));
-    },
-  });
-
-  const askModal = createAskModal({
-    onChatComplete: (sourceShapeIds, chatId, messages) => {
-      if (!activeSession) return;
-      const now = new Date().toISOString();
-      for (const shapeId of sourceShapeIds) {
-        const list = shapeChats[shapeId] ? shapeChats[shapeId].slice() : [];
-        const existing = list.findIndex((c) => c.id === chatId);
-        const entry: ShapeChat = {
-          id: chatId,
-          created_at: existing >= 0 ? list[existing].created_at : now,
-          messages: messages.slice(),
-        };
-        if (existing >= 0) list[existing] = entry;
-        else list.push(entry);
-        shapeChats[shapeId] = list;
-      }
-      // Persist immediately so chats survive crashes/reloads even before the
-      // next debounced canvas save fires.
-      void persistCurrentCanvas();
-      chatPanel.rebuild();
     },
   });
 
@@ -138,7 +125,6 @@ async function boot() {
   // it remains reachable whether the sidebar is open or collapsed.
   document.body.appendChild(sidebar.toggleEl);
   document.body.appendChild(settings.el);
-  document.body.appendChild(askModal.el);
 
   // Reposition / show / hide the active browser child webview (Chat or
   // Wikipedia) whenever the sidebar layout, the active tab, or the window
@@ -158,11 +144,16 @@ async function boot() {
   // Initial placement after the layout has been measured.
   scheduleBrowserSync();
 
-  // Hook the canvas selection toolbar reaches via `window`.
+  // Hook the canvas selection toolbar reaches via `window`. The canvas
+  // "Ask Claude" button used to open a draggable modal; now the request
+  // runs silently in the background and the chat-history panel pops open
+  // with the new chat already expanded once the response arrives.
   const w = window as unknown as {
     steinerAskClaude?: (ids: string[], text: string) => void;
   };
-  w.steinerAskClaude = (ids, text) => askModal.open({ sourceShapeIds: ids, seedText: text });
+  w.steinerAskClaude = (ids, text) => {
+    void runAskClaude(ids, text);
+  };
 
   await sessions.reload();
   await sessions.refreshSettings();
@@ -186,6 +177,110 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") canvasHost.flushPendingSave();
   });
+
+  async function runAskClaude(sourceShapeIds: string[], seedText: string) {
+    if (!activeSession) return;
+    const seed = seedText.trim().slice(0, 4000);
+    if (!seed) return;
+
+    let wordLimit = DEFAULT_ASK_WORD_LIMIT;
+    let modelId: string = DEFAULT_MODEL;
+    let prefix = DEFAULT_PROMPT_PREFIX;
+    let suffix = DEFAULT_PROMPT_SUFFIX;
+    try {
+      const s = await api.getSettings();
+      wordLimit = s.ask_word_limit ?? DEFAULT_ASK_WORD_LIMIT;
+      modelId = s.ask_model || DEFAULT_MODEL;
+      prefix = s.ask_prompt_prefix ?? DEFAULT_PROMPT_PREFIX;
+      suffix = s.ask_prompt_suffix ?? DEFAULT_PROMPT_SUFFIX;
+    } catch {
+      // Use defaults — most likely the user hasn't set anything yet.
+    }
+
+    // Format: `[prefix] [term][suffix]. [word limit request]`. The period
+    // is hardcoded so the suffix doesn't have to end one. Empty prefix/
+    // suffix collapse cleanly (no double-space, no leading punctuation).
+    const left = prefix ? `${prefix} ` : "";
+    const wordLimitRequest = `I'd like your response to be ${wordLimit} words or less.`;
+    const userPrompt = `${left}${seed}${suffix}. ${wordLimitRequest}`;
+    const messages: ChatMessage[] = [{ role: "user", content: userPrompt }];
+
+    const requestId = `ask_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+    const chatId = `chat_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+
+    // Open the panel right away. The chat row doesn't exist yet, but
+    // chatId is now in the expanded set so the row will render open the
+    // moment ask-done commits it.
+    chatPanel.openExpanded(chatId);
+
+    // One-shot listeners: detach as soon as ask-done or ask-error fires for
+    // this request. Chained on `currentRequest` so a stale listener can't
+    // commit a previous run's response.
+    const unlisteners: (() => void)[] = [];
+    const cleanup = () => {
+      for (const u of unlisteners) u();
+      unlisteners.length = 0;
+    };
+
+    try {
+      const u1 = await listen<{
+        request_id: string;
+        text: string;
+        segments: Segment[] | null;
+      }>("ask-done", (e) => {
+        if (e.payload.request_id !== requestId) return;
+        cleanup();
+        const segments = e.payload.segments || undefined;
+        messages.push({
+          role: "assistant",
+          content: e.payload.text,
+          segments,
+        });
+        commitChat(sourceShapeIds, chatId, messages.slice());
+      });
+      unlisteners.push(u1);
+
+      const u2 = await listen<{ request_id: string; message: string }>(
+        "ask-error",
+        (e) => {
+          if (e.payload.request_id !== requestId) return;
+          cleanup();
+          messages.push({
+            role: "assistant",
+            content: `[Error: ${e.payload.message}]`,
+          });
+          commitChat(sourceShapeIds, chatId, messages.slice());
+        },
+      );
+      unlisteners.push(u2);
+
+      await api.askClaudeStream(requestId, messages, modelId);
+    } catch (err) {
+      cleanup();
+      const msg = typeof err === "string" ? err : err instanceof Error ? err.message : "Failed";
+      messages.push({ role: "assistant", content: `[Error: ${msg}]` });
+      commitChat(sourceShapeIds, chatId, messages.slice());
+    }
+  }
+
+  function commitChat(sourceShapeIds: string[], chatId: string, messages: ChatMessage[]) {
+    if (!activeSession) return;
+    const now = new Date().toISOString();
+    for (const shapeId of sourceShapeIds) {
+      const list = shapeChats[shapeId] ? shapeChats[shapeId].slice() : [];
+      const existing = list.findIndex((c) => c.id === chatId);
+      const entry: ShapeChat = {
+        id: chatId,
+        created_at: existing >= 0 ? list[existing].created_at : now,
+        messages: messages.slice(),
+      };
+      if (existing >= 0) list[existing] = entry;
+      else list.push(entry);
+      shapeChats[shapeId] = list;
+    }
+    void persistCurrentCanvas();
+    chatPanel.openExpanded(chatId);
+  }
 
   function adoptSession(s: Session) {
     activeSession = s;

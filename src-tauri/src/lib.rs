@@ -114,6 +114,13 @@ pub struct Settings {
     pub ask_word_limit: Option<u32>,
     #[serde(default)]
     pub ask_model: Option<String>,
+    /// Prefix put before the term in the Ask Claude seed prompt.
+    /// Default: "Can you summarize". Format: `{prefix} {term}{suffix}. {word_limit_request}`.
+    #[serde(default)]
+    pub ask_prompt_prefix: Option<String>,
+    /// Suffix appended to the term in the Ask Claude seed prompt. Default: "".
+    #[serde(default)]
+    pub ask_prompt_suffix: Option<String>,
     #[serde(default)]
     pub dropbox_access_token: Option<String>,
     #[serde(default)]
@@ -225,6 +232,27 @@ fn set_ask_model(app: AppHandle, model: String) -> Result<(), String> {
     let mut s = read_settings(&app);
     let trimmed = model.trim();
     s.ask_model = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    write_settings(&app, &s)
+}
+
+#[tauri::command]
+fn set_ask_prompt_prefix(app: AppHandle, prefix: String) -> Result<(), String> {
+    let mut s = read_settings(&app);
+    // Empty string is meaningful (user wants no prefix); only None means
+    // "fall back to default" on the frontend. We trim to avoid stray
+    // whitespace that would render oddly between prefix and term.
+    let trimmed = prefix.trim();
+    s.ask_prompt_prefix = Some(trimmed.to_string());
+    write_settings(&app, &s)
+}
+
+#[tauri::command]
+fn set_ask_prompt_suffix(app: AppHandle, suffix: String) -> Result<(), String> {
+    let mut s = read_settings(&app);
+    // Trailing whitespace is fine to drop, but leading whitespace could be
+    // load-bearing (e.g. the user wants " — " vs "—"). Trim trailing only.
+    let trimmed = suffix.trim_end();
+    s.ask_prompt_suffix = Some(trimmed.to_string());
     write_settings(&app, &s)
 }
 
@@ -1003,6 +1031,8 @@ pub fn run() {
             set_api_key,
             set_ask_word_limit,
             set_ask_model,
+            set_ask_prompt_prefix,
+            set_ask_prompt_suffix,
             is_desktop,
             show_browser_webview,
             hide_browser_webview,

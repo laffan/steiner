@@ -1,8 +1,15 @@
-import { api, DEFAULT_ASK_WORD_LIMIT, DEFAULT_MODEL, MODELS } from "../api";
+import {
+  api,
+  DEFAULT_ASK_WORD_LIMIT,
+  DEFAULT_MODEL,
+  DEFAULT_PROMPT_PREFIX,
+  DEFAULT_PROMPT_SUFFIX,
+  MODELS,
+} from "../api";
 import { h } from "./dom-helpers";
 import { createSyncTab } from "./sync-tab";
 
-type TabId = "general" | "sync";
+type TabId = "general" | "prompt" | "sync";
 
 export function createSettingsModal() {
   let onClose: (() => void) | null = null;
@@ -111,6 +118,90 @@ export function createSettingsModal() {
     ],
   });
 
+  // --- Prompt tab ---
+
+  const prefixInput = h("input", {
+    attrs: { type: "text", placeholder: DEFAULT_PROMPT_PREFIX },
+    style: {
+      width: "100%",
+      padding: "8px 10px",
+      border: "1px solid #ddd",
+      borderRadius: "8px",
+      fontSize: "14px",
+      fontFamily: "inherit",
+      outline: "none",
+    },
+  }) as HTMLInputElement;
+
+  const suffixInput = h("input", {
+    attrs: {
+      type: "text",
+      placeholder: DEFAULT_PROMPT_SUFFIX || "(none)",
+    },
+    style: {
+      width: "100%",
+      padding: "8px 10px",
+      border: "1px solid #ddd",
+      borderRadius: "8px",
+      fontSize: "14px",
+      fontFamily: "inherit",
+      outline: "none",
+    },
+  }) as HTMLInputElement;
+
+  const promptPreview = h("div", {
+    style: {
+      fontSize: "12px",
+      color: "#444",
+      background: "#f6f6f6",
+      border: "1px solid #e5e5e5",
+      borderRadius: "8px",
+      padding: "10px 12px",
+      lineHeight: "1.45",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+    },
+  });
+
+  function updatePromptPreview() {
+    const prefix = prefixInput.value;
+    const suffix = suffixInput.value;
+    const limit = parseInt(wordLimitInput.value, 10) || DEFAULT_ASK_WORD_LIMIT;
+    const left = prefix ? `${prefix} ` : "";
+    promptPreview.textContent =
+      `${left}<term>${suffix}. I'd like your response to be ${limit} words or less.`;
+  }
+  prefixInput.addEventListener("input", updatePromptPreview);
+  suffixInput.addEventListener("input", updatePromptPreview);
+  wordLimitInput.addEventListener("input", updatePromptPreview);
+
+  const promptPane = h("div", {
+    style: { display: "flex", flexDirection: "column", gap: "10px" },
+    children: [
+      h("label", {
+        style: { fontSize: "13px", color: "#444" },
+        children: ["Prompt prefix (before the term)"],
+      }),
+      prefixInput,
+      h("label", {
+        style: { fontSize: "13px", color: "#444", marginTop: "4px" },
+        children: ["Prompt suffix (after the term, before the period)"],
+      }),
+      suffixInput,
+      h("div", {
+        style: { fontSize: "11px", color: "#888" },
+        children: [
+          'Format: "<prefix> <term><suffix>. I\'d like your response to be N words or less."',
+        ],
+      }),
+      h("label", {
+        style: { fontSize: "13px", color: "#444", marginTop: "4px" },
+        children: ["Preview"],
+      }),
+      promptPreview,
+    ],
+  });
+
   // --- Sync tab ---
 
   const syncTab = createSyncTab();
@@ -151,8 +242,10 @@ export function createSettingsModal() {
   }
 
   const generalTabBtn = makeTab("general", "General");
+  const promptTabBtn = makeTab("prompt", "Prompt");
   const syncTabBtn = makeTab("sync", "Sync");
   tabStrip.appendChild(generalTabBtn);
+  tabStrip.appendChild(promptTabBtn);
   tabStrip.appendChild(syncTabBtn);
 
   const contentPane = h("div", {
@@ -165,10 +258,14 @@ export function createSettingsModal() {
       borderBottom: active ? "2px solid #111" : "2px solid transparent",
     });
     Object.assign(generalTabBtn.style, activeStyle(activeTab === "general"));
+    Object.assign(promptTabBtn.style, activeStyle(activeTab === "prompt"));
     Object.assign(syncTabBtn.style, activeStyle(activeTab === "sync"));
     contentPane.innerHTML = "";
-    contentPane.appendChild(activeTab === "general" ? generalPane : syncTab.el);
+    if (activeTab === "general") contentPane.appendChild(generalPane);
+    else if (activeTab === "prompt") contentPane.appendChild(promptPane);
+    else contentPane.appendChild(syncTab.el);
     if (activeTab === "sync") void syncTab.refresh();
+    if (activeTab === "prompt") updatePromptPreview();
   }
 
   const saveBtn = h("button", {
@@ -194,6 +291,8 @@ export function createSettingsModal() {
         if (key) await api.setApiKey(key);
         await api.setAskWordLimit(limit);
         await api.setAskModel(model);
+        await api.setAskPromptPrefix(prefixInput.value);
+        await api.setAskPromptSuffix(suffixInput.value);
         generalStatus.textContent = "Saved.";
         setTimeout(close, 600);
       } catch (err) {
@@ -272,6 +371,8 @@ export function createSettingsModal() {
       apiInput.value = "";
       wordLimitInput.value = String(s.ask_word_limit ?? DEFAULT_ASK_WORD_LIMIT);
       modelSelect.value = s.ask_model ?? DEFAULT_MODEL;
+      prefixInput.value = s.ask_prompt_prefix ?? DEFAULT_PROMPT_PREFIX;
+      suffixInput.value = s.ask_prompt_suffix ?? DEFAULT_PROMPT_SUFFIX;
       generalStatus.textContent = s.anthropic_api_key
         ? `Key on file: ${s.anthropic_api_key}`
         : "No key set.";

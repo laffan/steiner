@@ -9,6 +9,9 @@ import {
   pointInBounds, screenToCanvas,
 } from "./utils";
 import { UndoManager } from "./undo-manager";
+import { isEmojiOnly, emojiToDataUrl } from "./emoji-sticker";
+
+const STICKER_SIZE = 100;
 import type { AppearanceMode, CanvasTheme } from "./themes";
 import { THEMES, getEffectiveVariant } from "./themes";
 import {
@@ -169,11 +172,33 @@ export class DrawingState extends EventTarget {
       this._pendingFlowParent = null;
       return null;
     }
+    // Emoji-only text becomes an image "sticker": rasterize at STICKER_SIZE
+    // and swap the shape type so it scales/crops/exports like any image.
+    const sticker = isEmojiOnly(trimmed)
+      ? { dataUrl: emojiToDataUrl(trimmed, STICKER_SIZE), name: trimmed }
+      : null;
+
     let shapeId: string;
     if (editing.shapeId) {
       shapeId = editing.shapeId;
       this.shapes = this.shapes.map((s) => {
         if (s.id !== editing.shapeId || s.type !== "text") return s;
+        if (sticker) {
+          const img: ImageShape = {
+            id: s.id,
+            type: "image",
+            position: s.position,
+            width: STICKER_SIZE,
+            height: STICKER_SIZE,
+            dataUrl: sticker.dataUrl,
+            name: sticker.name,
+            color: s.color,
+            parentId: s.parentId,
+            groupId: s.groupId,
+            pocketed: s.pocketed,
+          };
+          return img;
+        }
         const updated = { ...s, text: trimmed };
         // Auto-shrink width to content if not manually resized
         if (!s.manualWidth) {
@@ -183,12 +208,28 @@ export class DrawingState extends EventTarget {
       });
     } else {
       shapeId = generateId();
-      const fitWidth = autoFitWidth(trimmed, editing.fontSize, editing.width, this.fontFamily);
-      this.shapes = [...this.shapes, {
-        id: shapeId, type: "text", position: editing.position,
-        text: trimmed, fontSize: editing.fontSize, color: editing.color,
-        width: fitWidth,
-      } as TextShape];
+      if (sticker) {
+        this.shapes = [
+          ...this.shapes,
+          {
+            id: shapeId,
+            type: "image",
+            position: editing.position,
+            width: STICKER_SIZE,
+            height: STICKER_SIZE,
+            dataUrl: sticker.dataUrl,
+            name: sticker.name,
+            color: editing.color,
+          } as ImageShape,
+        ];
+      } else {
+        const fitWidth = autoFitWidth(trimmed, editing.fontSize, editing.width, this.fontFamily);
+        this.shapes = [...this.shapes, {
+          id: shapeId, type: "text", position: editing.position,
+          text: trimmed, fontSize: editing.fontSize, color: editing.color,
+          width: fitWidth,
+        } as TextShape];
+      }
       // Pending flowchart parent (set by startEditingFlowchartChild before
       // user typed) — wire the edge once the new shape exists.
       if (this._pendingFlowParent) {

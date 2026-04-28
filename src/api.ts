@@ -65,6 +65,8 @@ export interface Settings {
   anthropic_api_key: string | null;
   ask_word_limit: number | null;
   ask_model: string | null;
+  ask_prompt_prefix: string | null;
+  ask_prompt_suffix: string | null;
   dropbox_access_token: string | null;
   dropbox_refresh_token: string | null;
   dropbox_account_email: string | null;
@@ -72,6 +74,9 @@ export interface Settings {
   last_claude_url: string | null;
   last_wiki_url: string | null;
 }
+
+export const DEFAULT_PROMPT_PREFIX = "Can you summarize";
+export const DEFAULT_PROMPT_SUFFIX = "";
 
 /** Sidebar browser kinds — must match BROWSERS table in src-tauri/src/lib.rs. */
 export type BrowserKind = "chat" | "wiki";
@@ -104,6 +109,10 @@ export const api = {
   setAskWordLimit: (limit: number) =>
     invoke<void>("set_ask_word_limit", { limit }),
   setAskModel: (model: string) => invoke<void>("set_ask_model", { model }),
+  setAskPromptPrefix: (prefix: string) =>
+    invoke<void>("set_ask_prompt_prefix", { prefix }),
+  setAskPromptSuffix: (suffix: string) =>
+    invoke<void>("set_ask_prompt_suffix", { suffix }),
   isDesktop: () => invoke<boolean>("is_desktop"),
   showBrowserWebview: (
     kind: BrowserKind,
