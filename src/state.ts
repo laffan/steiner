@@ -399,8 +399,9 @@ export class DrawingState extends EventTarget {
       }
     }
 
-    const willEditText = this.tool === "text" && !this.brainstormMode;
-    if (!willEditText) canvas.setPointerCapture(e.pointerId);
+    // Text tool no longer creates a shape on single-click (it falls through
+    // to select-tool behavior below) — always capture so drag-select works.
+    canvas.setPointerCapture(e.pointerId);
 
     // Exit crop mode when clicking outside the cropping image (unless clicking its handles)
     if (this.croppingImageId) {
@@ -422,15 +423,14 @@ export class DrawingState extends EventTarget {
     }
 
     if (this.tool === "text" && !this.brainstormMode) {
-      // Text tool (not brainstorm — brainstorm has its own input widget)
-      const hit = findShapeAtPoint(canvasPt, this.shapes);
-      if (hit && hit.type === "text") {
-        this.startEditingExistingText(hit);
-      } else {
-        this.editingText = { shapeId: null, position: canvasPt, text: "", fontSize: this.fontSize, color: this.color, width: 350 };
-        this.notify("editingText");
-      }
-    } else if (this.brainstormMode) {
+      // Single click on the canvas drops back into the select tool. Text
+      // creation is handled by handleDoubleClick — that way a stray click
+      // never accidentally creates an empty text shape.
+      this.tool = "select";
+      this.notify("tool");
+    }
+
+    if (this.brainstormMode) {
       // Brainstorm mode — handled by brainstorm-input.ts widget, just skip
     } else if (this.tool === "select") {
       const handleHit = this.hitTestResizeHandles(canvasPt);
@@ -615,22 +615,34 @@ export class DrawingState extends EventTarget {
           if (flowDescendants.has(s.id)) return moveShape(s, dx, dy);
           return s;
         });
-        // While dragging a single text shape, keep the hover drop target up
-        // to date so the renderer can outline it.
-        if (this.selectedIds.size === 1) {
-          const draggedId = this.selectedIds.values().next().value as string;
-          const dragged = this.shapes.find((s) => s.id === draggedId);
-          if (dragged && dragged.type === "text") {
-            const b = getShapeBounds(dragged);
-            const center: Point = {
-              x: (b.minX + b.maxX) / 2,
-              y: (b.minY + b.maxY) / 2,
-            };
-            const t = this.flowchart.findDropTarget(center, this.shapes, draggedId);
-            const newId = t ? t.id : null;
-            if (newId !== this.flowDropTargetId) {
-              this.flowDropTargetId = newId;
+        // While dragging text shapes, keep the hover drop target up to date
+        // so the renderer can outline it. Uses the live cursor position so
+        // the target highlight matches what the user sees regardless of how
+        // many shapes are being dragged.
+        const draggedTextIds = new Set<string>();
+        for (const id of this.selectedIds) {
+          const s = this.shapes.find((s) => s.id === id);
+          if (s && s.type === "text") draggedTextIds.add(id);
+        }
+        if (draggedTextIds.size > 0) {
+          let hoverId: string | null = null;
+          for (let i = this.shapes.length - 1; i >= 0; i--) {
+            const s = this.shapes[i];
+            if (draggedTextIds.has(s.id)) continue;
+            if (s.type !== "text") continue;
+            const b = getShapeBounds(s);
+            if (
+              canvasPt.x >= b.minX &&
+              canvasPt.x <= b.maxX &&
+              canvasPt.y >= b.minY &&
+              canvasPt.y <= b.maxY
+            ) {
+              hoverId = s.id;
+              break;
             }
+          }
+          if (hoverId !== this.flowDropTargetId) {
+            this.flowDropTargetId = hoverId;
           }
         }
         this.notify("shapes");
@@ -719,61 +731,95 @@ export class DrawingState extends EventTarget {
       });
 
       // Flowchart drop: any number of dragged text shapes dropped on top of
-      // another text shape become its children (each stacked below existing
-      // siblings). The drop target is found via the centroid of the dragged
-      // group; targets that are themselves part of the dragged group are
-      // skipped (you can't parent to yourself or a sibling).
+      // another text shape. Behavior depends on the modifier:
+      //   - default            → each dropped shape becomes a child of the
+      //                          target (parent → child arrow, stacked below
+      //                          existing siblings)
+      //   - cmd / ctrl held    → each dropped shape's text is APPENDED to
+      //                          the target's text and the dropped shape is
+      //                          deleted (no arrow drawn)
+      // The target is found via the live cursor position at drop time, not
+      // the centroid — works the same for one or many dragged shapes.
       const droppedTextIds: string[] = [];
-      for (const id of this.selectedIds) {
-        const s = this.shapes.find((s) => s.id === id);
-        if (s && s.type === "text") droppedTextIds.push(id);
+      for (const s of this.shapes) {
+        if (this.selectedIds.has(s.id) && s.type === "text") {
+          droppedTextIds.push(s.id);
+        }
       }
       if (droppedTextIds.length > 0) {
-        let cx = 0, cy = 0;
-        for (const id of droppedTextIds) {
-          const s = this.shapes.find((s) => s.id === id);
-          if (!s) continue;
-          const b = getShapeBounds(s);
-          cx += (b.minX + b.maxX) / 2;
-          cy += (b.minY + b.maxY) / 2;
-        }
-        cx /= droppedTextIds.length;
-        cy /= droppedTextIds.length;
-
         const droppedSet = new Set(droppedTextIds);
+        let dropPt: Point | null = null;
+        if (this.canvasEl) {
+          const r = this.canvasEl.getBoundingClientRect();
+          dropPt = screenToCanvas({ x: e.clientX - r.left, y: e.clientY - r.top }, this.camera);
+        }
+
         let target: Shape | null = null;
-        for (let i = this.shapes.length - 1; i >= 0; i--) {
-          const s = this.shapes[i];
-          if (droppedSet.has(s.id)) continue;
-          if (s.type !== "text") continue;
-          const b = getShapeBounds(s);
-          if (cx >= b.minX && cx <= b.maxX && cy >= b.minY && cy <= b.maxY) {
-            target = s;
-            break;
+        if (dropPt) {
+          for (let i = this.shapes.length - 1; i >= 0; i--) {
+            const s = this.shapes[i];
+            if (droppedSet.has(s.id)) continue;
+            if (s.type !== "text") continue;
+            const b = getShapeBounds(s);
+            if (
+              dropPt.x >= b.minX &&
+              dropPt.x <= b.maxX &&
+              dropPt.y >= b.minY &&
+              dropPt.y <= b.maxY
+            ) {
+              target = s;
+              break;
+            }
           }
         }
 
         if (target) {
-          for (const droppedId of droppedTextIds) {
-            const dropped = this.shapes.find((s) => s.id === droppedId);
-            if (!dropped || dropped.type !== "text") continue;
-            const oldBounds = getShapeBounds(dropped);
-            const newTL = this.flowchart.tryConnect(droppedId, target.id, this.shapes);
-            if (!newTL) continue;
-            const dx = newTL.minX - oldBounds.minX;
-            const dy = newTL.minY - oldBounds.minY;
-            this.shapes = this.shapes.map((s) =>
-              s.id === droppedId && s.type === "text"
-                ? { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } }
-                : s,
-            );
-            // Snapping the parent also pulls its descendants — replay their
-            // existing offset so the chain stays intact.
-            const desc = this.flowchart.descendantsOf(droppedId);
-            if (desc.size > 0) {
+          const appendMode = e.metaKey || e.ctrlKey;
+          if (appendMode) {
+            // Concatenate dropped texts in stack order and merge into target.
+            const targetId = target.id;
+            const appended: string[] = [];
+            for (const id of droppedTextIds) {
+              const s = this.shapes.find((sh) => sh.id === id);
+              if (s && s.type === "text") appended.push(s.text);
+            }
+            const merged = appended.join("\n\n");
+            this.shapes = this.shapes
+              .filter((s) => !droppedSet.has(s.id))
+              .map((s) => {
+                if (s.id !== targetId || s.type !== "text") return s;
+                const nextText = s.text ? `${s.text}\n\n${merged}` : merged;
+                const updated = { ...s, text: nextText };
+                if (!s.manualWidth) {
+                  updated.width = autoFitWidth(nextText, s.fontSize, s.width, this.fontFamily);
+                }
+                return updated;
+              });
+            for (const id of droppedTextIds) this.flowchart.removeNode(id);
+            this.selectedIds = new Set([targetId]);
+            this.notify("selectedIds");
+          } else {
+            for (const droppedId of droppedTextIds) {
+              const dropped = this.shapes.find((s) => s.id === droppedId);
+              if (!dropped || dropped.type !== "text") continue;
+              const oldBounds = getShapeBounds(dropped);
+              const newTL = this.flowchart.tryConnect(droppedId, target.id, this.shapes);
+              if (!newTL) continue;
+              const dx = newTL.minX - oldBounds.minX;
+              const dy = newTL.minY - oldBounds.minY;
               this.shapes = this.shapes.map((s) =>
-                desc.has(s.id) ? moveShape(s, dx, dy) : s,
+                s.id === droppedId && s.type === "text"
+                  ? { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } }
+                  : s,
               );
+              // Snapping the parent also pulls its descendants — replay their
+              // existing offset so the chain stays intact.
+              const desc = this.flowchart.descendantsOf(droppedId);
+              if (desc.size > 0) {
+                this.shapes = this.shapes.map((s) =>
+                  desc.has(s.id) ? moveShape(s, dx, dy) : s,
+                );
+              }
             }
           }
         }
