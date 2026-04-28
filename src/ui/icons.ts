@@ -33,6 +33,8 @@ const PATHS: Record<string, string> = {
   "chat-history": `<path d="M12 8v4l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 4v4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
   // A tag/chip — used for the term-style preset menu (Concept/Name/Book/Definition).
   "term-style": `<path d="M2 12.5L11.5 22a1.5 1.5 0 0 0 2.12 0L22 13.62a1.5 1.5 0 0 0 .44-1.06V4a2 2 0 0 0-2-2h-8.56a1.5 1.5 0 0 0-1.06.44L2 10.94a1.5 1.5 0 0 0 0 2.12Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="16" cy="8" r="1.5" stroke="currentColor" stroke-width="1.5"/>`,
+  // Three nodes joined by a bracket — flowchart subtree tidy.
+  "tidy": `<rect x="17" y="3" width="5" height="7" rx="0.6" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="8.5" width="5" height="7" rx="0.6" stroke="currentColor" stroke-width="1.5"/><rect x="17" y="14" width="5" height="7" rx="0.6" stroke="currentColor" stroke-width="1.5"/><path d="M17 17.5H13.5C12.3954 17.5 11.5 16.6046 11.5 15.5V8.5C11.5 7.39543 12.3954 6.5 13.5 6.5H17" stroke="currentColor" stroke-width="1.5"/><path d="M11.5 12H7" stroke="currentColor" stroke-width="1.5"/>`,
 };
 
 /** Create an SVG icon element. Color is inherited from CSS `color` via currentColor. */

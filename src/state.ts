@@ -21,7 +21,6 @@ import {
 } from "./state-helpers";
 import { computePocketLayout, POCKET_ZONE_WIDTH } from "./utils";
 import { FlowchartLayer } from "./flowchart";
-import { TIDY_BUTTON_RADIUS, TIDY_BUTTON_GAP } from "./renderer";
 
 export interface EditingText {
   shapeId: string | null;
@@ -375,23 +374,6 @@ export class DrawingState extends EventTarget {
     this.notify("shapes");
   }
 
-  /** Find the parent shape whose tidy button contains `screenPt`. */
-  private _hitTestTidyButton(screenPt: Point): string | null {
-    const z = this.camera.zoom;
-    for (const s of this.shapes) {
-      if (s.type !== "text") continue;
-      if (s.pocketed) continue;
-      if (this.flowchart.childrenOf(s.id).length === 0) continue;
-      const b = getShapeBounds(s);
-      const cx = (b.minX + b.maxX) / 2 * z + this.camera.x;
-      const cy = b.minY * z + this.camera.y - TIDY_BUTTON_GAP - TIDY_BUTTON_RADIUS;
-      if (Math.hypot(screenPt.x - cx, screenPt.y - cy) < TIDY_BUTTON_RADIUS) {
-        return s.id;
-      }
-    }
-    return null;
-  }
-
   // === Resize handle hit test ===
   hitTestResizeHandles(canvasPt: Point): { shapeId: string; handle: ResizeHandle } | null {
     const handleRadius = (HANDLE_SIZE / 2) / this.camera.zoom + 2;
@@ -452,14 +434,6 @@ export class DrawingState extends EventTarget {
       }
     }
 
-    // Click on a tidy button above a parent text shape — runs tidy() on its
-    // subtree. Hit-tested in screen space because the button has a fixed
-    // pixel size regardless of zoom (drawn in screen space by the renderer).
-    const tidyHit = this._hitTestTidyButton(screenPt);
-    if (tidyHit) {
-      this.tidySubtree(tidyHit);
-      return;
-    }
 
     // Text tool no longer creates a shape on single-click (it falls through
     // to select-tool behavior below) — always capture so drag-select works.

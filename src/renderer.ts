@@ -168,21 +168,6 @@ export function render(canvas: HTMLCanvasElement, state: RenderState): void {
     }
   }
 
-  // Tidy buttons — one above each text shape that has flowchart children.
-  // Drawn in screen space (fixed pixel size). Hit-test in state.handlePointerDown.
-  if (state.flowchart) {
-    for (const shape of shapes) {
-      if (shape.type !== "text") continue;
-      if (pocketedIds.has(shape.id)) continue;
-      if (state.flowchart.childrenOf(shape.id).length === 0) continue;
-      const b = getShapeBounds(shape);
-      const cx = (b.minX + b.maxX) / 2;
-      const sx = cx * camera.zoom + camera.x;
-      const sy = b.minY * camera.zoom + camera.y - TIDY_BUTTON_GAP - TIDY_BUTTON_RADIUS;
-      drawTidyButton(ctx, sx, sy, theme);
-    }
-  }
-
   // Draw pocket tray on left edge (always visible when items are pocketed, or during drag)
   const hasPocketed = pocketLayout.entries.length > 0;
   if (hasPocketed || state.isDragging) {
@@ -556,71 +541,6 @@ function drawBackground(ctx: CanvasRenderingContext2D, camera: Camera, w: number
       }
     }
   }
-  ctx.restore();
-}
-
-/** Tidy-button geometry — exported so the click handler in state.ts uses
- * the same pixel radius/gap when hit-testing in screen space. */
-export const TIDY_BUTTON_RADIUS = 12;
-export const TIDY_BUTTON_GAP = 8;
-
-/** Draw the tidy-tree icon (transcribed from temp/icon-tidy.svg) as a circular
- * button at (sx, sy), screen space. */
-function drawTidyButton(
-  ctx: CanvasRenderingContext2D,
-  sx: number,
-  sy: number,
-  theme: CanvasTheme,
-): void {
-  const r = TIDY_BUTTON_RADIUS;
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(sx, sy, r, 0, Math.PI * 2);
-  ctx.fillStyle = theme.uiBackground;
-  ctx.fill();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = theme.foreground;
-  ctx.stroke();
-
-  // Icon paths: three rounded rects + a "C" connector + a stub line, in a
-  // 24-unit viewBox centered on (sx, sy). Scale 16/24 leaves breathing room
-  // inside the 12px-radius circle.
-  const size = 16;
-  const s = size / 24;
-  const ox = sx - size / 2;
-  const oy = sy - size / 2;
-  const tx = (vx: number) => ox + vx * s;
-  const ty = (vy: number) => oy + vy * s;
-
-  ctx.lineWidth = 1.5 * s + 0.5;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = theme.foreground;
-
-  // Three 5×7 nodes: top-right, left-middle, bottom-right.
-  const nodes: [number, number][] = [[17, 3], [2, 8.5], [17, 14]];
-  for (const [vx, vy] of nodes) {
-    ctx.beginPath();
-    roundRect(ctx, tx(vx), ty(vy), 5 * s, 7 * s, 1 * s);
-    ctx.stroke();
-  }
-
-  // Bracket from (17, 17.5) up to (17, 6.5) via the rounded corner at (11.5, ±).
-  ctx.beginPath();
-  ctx.moveTo(tx(17), ty(17.5));
-  ctx.lineTo(tx(13.5), ty(17.5));
-  ctx.quadraticCurveTo(tx(11.5), ty(17.5), tx(11.5), ty(15.5));
-  ctx.lineTo(tx(11.5), ty(8.5));
-  ctx.quadraticCurveTo(tx(11.5), ty(6.5), tx(13.5), ty(6.5));
-  ctx.lineTo(tx(17), ty(6.5));
-  ctx.stroke();
-
-  // Stub from the bracket midpoint to the left node.
-  ctx.beginPath();
-  ctx.moveTo(tx(11.5), ty(12));
-  ctx.lineTo(tx(7), ty(12));
-  ctx.stroke();
-
   ctx.restore();
 }
 
