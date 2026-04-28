@@ -81,15 +81,13 @@ export function createSessionsSidebar(opts: Options) {
     children: [newBtn, settingsBtn, settingsStatus],
   });
 
-  const root = h("aside", {
+  const root = h("div", {
     style: {
-      width: "280px",
-      minWidth: "280px",
-      borderLeft: "1px solid #e5e5e5",
+      flex: "1",
+      minHeight: "0",
       background: "#fafafa",
       display: "flex",
       flexDirection: "column",
-      height: "100%",
     },
     children: [header, list],
   });

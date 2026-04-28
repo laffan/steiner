@@ -7,6 +7,7 @@ import { createCanvasHost, type CanvasSnapshot } from "./ui/canvas-host";
 import { createAskModal } from "./ui/ask-modal";
 import { createChatHistoryPanel } from "./ui/chat-history-panel";
 import { showExportModal } from "./ui/export-modal";
+import { createSidebar, syncChatWebview } from "./ui/sidebar";
 import { h } from "./ui/dom-helpers";
 
 type ShapeChats = Record<string, ShapeChat[]>;
@@ -20,17 +21,33 @@ async function boot() {
   let shapeChats: ShapeChats = {};
   let transcripts: TranscriptEntry[] = [];
 
-  const sidebar = createSessionsSidebar({
+  const sessions = createSessionsSidebar({
     onSelect: (id) => loadSession(id),
     onCreate: async () => {
       await persistCurrentCanvas();
       const s = await api.createSession(undefined, DEFAULT_MODEL);
       adoptSession(s);
-      await sidebar.reload();
+      await sessions.reload();
     },
-    onOpenSettings: () => settings.open(() => sidebar.refreshSettings()),
+    onOpenSettings: () => settings.open(() => sessions.refreshSettings()),
     onExportPdf: (id) => exportSessionPdf(id),
     getActiveId: () => activeSession?.id || null,
+  });
+
+  // Probe the platform once so the sidebar can decide whether to surface the
+  // Chat tab. Falls back to "desktop" if the call fails — better to expose
+  // the feature than to silently strip it.
+  let isDesktop = true;
+  try {
+    isDesktop = await api.isDesktop();
+  } catch {
+    isDesktop = true;
+  }
+
+  const sidebar = createSidebar({
+    sessionsContent: sessions.el,
+    desktop: isDesktop,
+    onLayoutChange: () => scheduleChatSync(),
   });
 
   const settings = createSettingsModal();
@@ -111,13 +128,35 @@ async function boot() {
       width: "100%",
       height: "100%",
       flexDirection: "row",
+      position: "relative",
     },
-    children: [canvasHost.el, sidebar.el],
+    children: [sidebar.el, canvasHost.el],
   });
 
   root.appendChild(layout);
+  // The collapse toggle floats over the canvas in the upper-right corner so
+  // it remains reachable whether the sidebar is open or collapsed.
+  document.body.appendChild(sidebar.toggleEl);
   document.body.appendChild(settings.el);
   document.body.appendChild(askModal.el);
+
+  // Reposition / show / hide the native claude.ai child webview whenever the
+  // sidebar layout, the active tab, or the window itself changes. The
+  // requestAnimationFrame coalesces bursts (resize drags, etc.).
+  let chatSyncPending = false;
+  function scheduleChatSync() {
+    if (chatSyncPending) return;
+    chatSyncPending = true;
+    requestAnimationFrame(() => {
+      chatSyncPending = false;
+      void syncChatWebview(sidebar.chatRect());
+    });
+  }
+  window.addEventListener("resize", scheduleChatSync);
+  // Rust emits this after it relayouts the canvas webview on window resize.
+  void listen("window-resized", () => scheduleChatSync());
+  // Initial placement after the layout has been measured.
+  scheduleChatSync();
 
   // Hook the canvas selection toolbar reaches via `window`.
   const w = window as unknown as {
@@ -125,8 +164,8 @@ async function boot() {
   };
   w.steinerAskClaude = (ids, text) => askModal.open({ sourceShapeIds: ids, seedText: text });
 
-  await sidebar.reload();
-  await sidebar.refreshSettings();
+  await sessions.reload();
+  await sessions.refreshSettings();
 
   // Auto-select most recent session, or create one if none exist.
   const metas = await api.listSessions();
@@ -135,11 +174,11 @@ async function boot() {
   } else {
     const s = await api.createSession(undefined, DEFAULT_MODEL);
     adoptSession(s);
-    await sidebar.reload();
+    await sessions.reload();
   }
 
   await listen<string>("session-updated", () => {
-    sidebar.reload();
+    sessions.reload();
   });
 
   // Flush any pending canvas save when the window/tab is hidden.
@@ -153,7 +192,7 @@ async function boot() {
     shapeChats = readShapeChats(s.canvas);
     transcripts = readTranscripts(s.canvas);
     canvasHost.load(snapFromBackend(s.canvas));
-    sidebar.render();
+    sessions.render();
     chatPanel.rebuild();
   }
 

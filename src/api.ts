@@ -69,6 +69,7 @@ export interface Settings {
   dropbox_refresh_token: string | null;
   dropbox_account_email: string | null;
   dropbox_last_sync: string | null;
+  last_claude_url: string | null;
 }
 
 export interface DropboxStatus {
@@ -99,6 +100,10 @@ export const api = {
   setAskWordLimit: (limit: number) =>
     invoke<void>("set_ask_word_limit", { limit }),
   setAskModel: (model: string) => invoke<void>("set_ask_model", { model }),
+  isDesktop: () => invoke<boolean>("is_desktop"),
+  showChatWebview: (x: number, y: number, w: number, h: number) =>
+    invoke<void>("show_chat_webview", { x, y, w, h }),
+  hideChatWebview: () => invoke<void>("hide_chat_webview"),
 
   listSessions: () => invoke<SessionMeta[]>("list_sessions"),
   createSession: (title?: string, model?: string) =>

@@ -5,6 +5,8 @@ use std::sync::Mutex;
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+#[cfg(desktop)]
+use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WindowEvent};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl};
 use uuid::Uuid;
 
@@ -13,6 +15,12 @@ mod dropbox;
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
+
+const WINDOW_LABEL: &str = "main";
+#[cfg(desktop)]
+const CANVAS_LABEL: &str = "canvas";
+#[cfg(desktop)]
+const CHAT_LABEL: &str = "chat";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -78,10 +86,16 @@ pub struct Settings {
     pub dropbox_account_email: Option<String>,
     #[serde(default)]
     pub dropbox_last_sync: Option<String>,
+    #[serde(default)]
+    pub last_claude_url: Option<String>,
 }
 
 pub struct AppState {
     pub current_stream: Mutex<Option<String>>, // session_id of in-flight stream
+    /// Set once the chat (claude.ai) child webview has been added to the
+    /// window. Subsequent show calls just reposition the existing webview.
+    #[cfg(desktop)]
+    pub chat_webview_created: Mutex<bool>,
 }
 
 // --- Path helpers ---
@@ -173,6 +187,126 @@ fn set_ask_model(app: AppHandle, model: String) -> Result<(), String> {
     let trimmed = model.trim();
     s.ask_model = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
     write_settings(&app, &s)
+}
+
+#[tauri::command]
+fn is_desktop() -> bool {
+    cfg!(desktop)
+}
+
+#[tauri::command]
+fn get_last_claude_url(app: AppHandle) -> Option<String> {
+    read_settings(&app).last_claude_url
+}
+
+#[tauri::command]
+fn set_last_claude_url(app: AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with("https://claude.ai") && !url.starts_with("https://www.claude.ai") {
+        return Ok(());
+    }
+    let mut s = read_settings(&app);
+    if s.last_claude_url.as_deref() == Some(url.as_str()) {
+        return Ok(());
+    }
+    s.last_claude_url = Some(url);
+    write_settings(&app, &s)
+}
+
+// --- Chat (claude.ai) child webview ---
+//
+// Desktop only: a second WKWebView is parented under the main window and
+// positioned by the frontend to overlay the sidebar's "Chat" tab area. The
+// webview is created lazily on first show and then just repositioned on
+// subsequent calls. iOS has no equivalent — the Chat tab is hidden in the UI.
+
+#[cfg(desktop)]
+fn ensure_chat_webview(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "AppState missing".to_string())?;
+    let mut created = state
+        .chat_webview_created
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if *created {
+        return Ok(());
+    }
+
+    let window = app
+        .get_window(WINDOW_LABEL)
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    let initial_url = read_settings(app)
+        .last_claude_url
+        .filter(|u| u.starts_with("https://claude.ai") || u.starts_with("https://www.claude.ai"))
+        .unwrap_or_else(|| "https://claude.ai/".to_string());
+
+    let parsed_url: tauri::Url = initial_url.parse().unwrap_or_else(|_| {
+        "https://claude.ai/"
+            .parse()
+            .expect("static fallback URL parses")
+    });
+    let app_for_nav = app.clone();
+    let builder = WebviewBuilder::new(CHAT_LABEL, WebviewUrl::External(parsed_url))
+        .on_navigation(move |url| {
+        let s = url.to_string();
+        if s.starts_with("https://claude.ai") || s.starts_with("https://www.claude.ai") {
+            let _ = set_last_claude_url(app_for_nav.clone(), s);
+        }
+        true
+    });
+
+    window
+        .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w.max(1.0), h.max(1.0)))
+        .map_err(|e| e.to_string())?;
+
+    *created = true;
+    Ok(())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn show_chat_webview(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    ensure_chat_webview(&app, x, y, w, h)?;
+    let webview = app
+        .get_webview(CHAT_LABEL)
+        .ok_or_else(|| "chat webview not found".to_string())?;
+    webview
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    webview
+        .set_size(LogicalSize::new(w.max(1.0), h.max(1.0)))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn hide_chat_webview(app: AppHandle) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(CHAT_LABEL) {
+        // Park offscreen at zero size; recreating/destroying webviews mid-run
+        // is finicky, so we keep it alive and just hide it.
+        webview
+            .set_size(LogicalSize::new(1.0, 1.0))
+            .map_err(|e| e.to_string())?;
+        webview
+            .set_position(LogicalPosition::new(-10000.0, -10000.0))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// Mobile shims so the frontend can call the same commands on every platform.
+#[cfg(not(desktop))]
+#[tauri::command]
+fn show_chat_webview(_x: f64, _y: f64, _w: f64, _h: f64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn hide_chat_webview() -> Result<(), String> {
+    Ok(())
 }
 
 // --- Sessions ---
@@ -712,19 +846,61 @@ async fn ask_claude_stream(
 
 #[cfg(desktop)]
 fn build_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let initial_w = 1400.0_f64;
+    let initial_h = 900.0_f64;
+
+    // Use a bare Window + child Webview so we can later parent a second
+    // (claude.ai) child webview under the same window for the sidebar's Chat
+    // tab. WebviewWindowBuilder produces a single-webview window that doesn't
+    // allow siblings, so we build the canvas as an explicit child instead.
+    let window = tauri::window::WindowBuilder::new(app, WINDOW_LABEL)
         .title("Steiner")
-        .inner_size(1400.0, 900.0)
+        .inner_size(initial_w, initial_h)
         .min_inner_size(700.0, 500.0)
         .resizable(true)
-        .disable_drag_drop_handler()
         .build()?;
+
+    let canvas = WebviewBuilder::new(CANVAS_LABEL, WebviewUrl::App("index.html".into()))
+        .disable_drag_drop_handler();
+
+    window.add_child(
+        canvas,
+        LogicalPosition::new(0.0, 0.0),
+        LogicalSize::new(initial_w, initial_h),
+    )?;
+
+    // Keep the canvas webview filling the window on resize. The chat webview
+    // (when present) is repositioned by the frontend via show_chat_webview,
+    // so it doesn't need to be repinned on resize from here.
+    let app_for_resize = app.handle().clone();
+    window.on_window_event(move |event| {
+        if matches!(
+            event,
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+        ) {
+            if let (Some(win), Some(canvas)) = (
+                app_for_resize.get_window(WINDOW_LABEL),
+                app_for_resize.get_webview(CANVAS_LABEL),
+            ) {
+                if let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) {
+                    let lw = size.width as f64 / scale;
+                    let lh = size.height as f64 / scale;
+                    let _ = canvas.set_position(LogicalPosition::new(0.0, 0.0));
+                    let _ = canvas.set_size(LogicalSize::new(lw.max(1.0), lh.max(1.0)));
+                }
+                // Tell the frontend to reapply chat webview bounds (it knows
+                // its own sidebar geometry).
+                let _ = app_for_resize.emit("window-resized", ());
+            }
+        }
+    });
+
     Ok(())
 }
 
 #[cfg(not(desktop))]
 fn build_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    tauri::WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::App("index.html".into()))
         .disable_drag_drop_handler()
         .build()?;
     Ok(())
@@ -753,12 +929,19 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .manage(AppState {
             current_stream: Mutex::new(None),
+            #[cfg(desktop)]
+            chat_webview_created: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_api_key,
             set_ask_word_limit,
             set_ask_model,
+            is_desktop,
+            get_last_claude_url,
+            set_last_claude_url,
+            show_chat_webview,
+            hide_chat_webview,
             list_sessions,
             create_session,
             get_session,
