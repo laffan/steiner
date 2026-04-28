@@ -3,13 +3,25 @@ import { COLOR_PALETTE, BACKGROUND_COLORS, TEXT_COLORS } from "../types";
 import { canvasToScreen, computePocketLayout, getShapeBounds } from "../utils";
 import { h, clearChildren } from "./dom-helpers";
 import { icon } from "./icons";
+import { HIGHLIGHT_STYLE } from "./chat-bubble";
+
+type PopupType = "color" | "bg" | "size" | "align" | "termStyle";
+
+// The four chat-segment "kinds" mapped onto canvas-friendly text styles.
+// Order is the visual order in the popup row.
+const TERM_STYLE_PRESETS: { kind: "concept" | "name" | "book" | "definition"; label: string }[] = [
+  { kind: "name", label: "Name" },
+  { kind: "definition", label: "Definition" },
+  { kind: "book", label: "Book" },
+  { kind: "concept", label: "Concept" },
+];
 
 export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () => void): HTMLElement {
   const container = h("div", {
     style: { position: "absolute", display: "none", gap: "2px", zIndex: "200", pointerEvents: "auto" },
   });
 
-  let activePopup: "color" | "bg" | "size" | "align" | null = null;
+  let activePopup: PopupType | null = null;
   let popupEl: HTMLElement | null = null;
   let popupWrapper: HTMLElement | null = null;
   let isRenamingImage = false;
@@ -88,6 +100,55 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
     closePopup();
   });
 
+  function makeTermStyleMenu(state: DrawingState): HTMLElement {
+    const theme = state.theme;
+    const panel = h("div", {
+      style: {
+        position: "absolute",
+        top: "-40px",
+        left: "50%",
+        transform: "translateX(-50%)",
+        display: "flex",
+        gap: "4px",
+        padding: "5px 6px",
+        background: theme.uiBackground,
+        borderRadius: "8px",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+        border: `1px solid ${theme.uiBorder}`,
+        zIndex: "300",
+        whiteSpace: "nowrap",
+      },
+    });
+    for (const { kind, label } of TERM_STYLE_PRESETS) {
+      const styleSpec = HIGHLIGHT_STYLE[kind];
+      const bg = (styleSpec.background as string) || "#eee";
+      const fg = (styleSpec.color as string) || "#111";
+      const chip = h("button", {
+        title: `Apply ${label} style`,
+        style: {
+          padding: "3px 10px",
+          border: "1px solid rgba(0,0,0,0.06)",
+          borderRadius: "10px",
+          background: bg,
+          color: fg,
+          fontSize: "11px",
+          fontWeight: "500",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          fontStyle: (styleSpec.fontStyle as string) || "normal",
+        },
+        children: [label],
+        onClick: () => {
+          state.applyTextStyle(fg, bg);
+          closePopup();
+        },
+      });
+      panel.appendChild(chip);
+    }
+    panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+    return panel;
+  }
+
   function makeAlignMenu(state: DrawingState): HTMLElement {
     const theme = state.theme;
     const btnStyle: Partial<CSSStyleDeclaration> = {
@@ -116,7 +177,7 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
     return panel;
   }
 
-  function togglePopup(type: "color" | "bg" | "size" | "align", wrapper: HTMLElement, create: () => HTMLElement) {
+  function togglePopup(type: PopupType, wrapper: HTMLElement, create: () => HTMLElement) {
     if (activePopup === type) { closePopup(); return; }
     closePopup();
     popupEl = create();
@@ -275,6 +336,17 @@ export function createSelectionToolbar(state: DrawingState, onMoveToShelf: () =>
         state.changeSelectedBackground(c);
         closePopup();
       }));
+    }
+
+    if (hasText) {
+      const wrapper = h("div", { style: { position: "relative" } });
+      wrapper.appendChild(makeIconBtn("term-style", "Term style", () => {
+        togglePopup("termStyle", wrapper, () => makeTermStyleMenu(state));
+      }));
+      container.appendChild(wrapper);
+      if (savedPopup === "termStyle") {
+        togglePopup("termStyle", wrapper, () => makeTermStyleMenu(state));
+      }
     }
 
     if (hasText) {

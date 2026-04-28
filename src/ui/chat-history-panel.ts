@@ -517,14 +517,29 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
         // Skip user-role messages: the seed prompt just repeats the source
         // text shown in the row header, and there's no follow-up UI anymore
         // (the modal is gone). Only the assistant response carries new info.
+        let hasAssistant = false;
         for (const m of r.chat.messages) {
           if (m.role !== "assistant") continue;
+          hasAssistant = true;
           body.appendChild(
             makeChatBubble({
               role: m.role,
               content: m.content,
               segments: m.segments,
               sourceShapeIds: [r.shapeId],
+            }),
+          );
+        }
+        if (!hasAssistant) {
+          body.appendChild(
+            h("div", {
+              style: {
+                color: "#888",
+                fontSize: "13px",
+                fontStyle: "italic",
+                padding: "4px 2px",
+              },
+              children: ["Asking Claude…"],
             }),
           );
         }

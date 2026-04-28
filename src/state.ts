@@ -718,36 +718,62 @@ export class DrawingState extends EventTarget {
         return s;
       });
 
-      // Flowchart drop: a single text shape dropped on top of another text shape
-      // becomes its child (or sibling, if the target already has children).
-      if (this.selectedIds.size === 1) {
-        const droppedId = this.selectedIds.values().next().value as string;
-        const dropped = this.shapes.find((s) => s.id === droppedId);
-        if (dropped && dropped.type === "text") {
-          const oldBounds = getShapeBounds(dropped);
-          const center: Point = {
-            x: (oldBounds.minX + oldBounds.maxX) / 2,
-            y: (oldBounds.minY + oldBounds.maxY) / 2,
-          };
-          const target = this.flowchart.findDropTarget(center, this.shapes, droppedId);
-          if (target) {
+      // Flowchart drop: any number of dragged text shapes dropped on top of
+      // another text shape become its children (each stacked below existing
+      // siblings). The drop target is found via the centroid of the dragged
+      // group; targets that are themselves part of the dragged group are
+      // skipped (you can't parent to yourself or a sibling).
+      const droppedTextIds: string[] = [];
+      for (const id of this.selectedIds) {
+        const s = this.shapes.find((s) => s.id === id);
+        if (s && s.type === "text") droppedTextIds.push(id);
+      }
+      if (droppedTextIds.length > 0) {
+        let cx = 0, cy = 0;
+        for (const id of droppedTextIds) {
+          const s = this.shapes.find((s) => s.id === id);
+          if (!s) continue;
+          const b = getShapeBounds(s);
+          cx += (b.minX + b.maxX) / 2;
+          cy += (b.minY + b.maxY) / 2;
+        }
+        cx /= droppedTextIds.length;
+        cy /= droppedTextIds.length;
+
+        const droppedSet = new Set(droppedTextIds);
+        let target: Shape | null = null;
+        for (let i = this.shapes.length - 1; i >= 0; i--) {
+          const s = this.shapes[i];
+          if (droppedSet.has(s.id)) continue;
+          if (s.type !== "text") continue;
+          const b = getShapeBounds(s);
+          if (cx >= b.minX && cx <= b.maxX && cy >= b.minY && cy <= b.maxY) {
+            target = s;
+            break;
+          }
+        }
+
+        if (target) {
+          for (const droppedId of droppedTextIds) {
+            const dropped = this.shapes.find((s) => s.id === droppedId);
+            if (!dropped || dropped.type !== "text") continue;
+            const oldBounds = getShapeBounds(dropped);
             const newTL = this.flowchart.tryConnect(droppedId, target.id, this.shapes);
-            if (newTL) {
-              const dx = newTL.minX - oldBounds.minX;
-              const dy = newTL.minY - oldBounds.minY;
+            if (!newTL) continue;
+            const dx = newTL.minX - oldBounds.minX;
+            const dy = newTL.minY - oldBounds.minY;
+            this.shapes = this.shapes.map((s) =>
+              s.id === droppedId && s.type === "text"
+                ? { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } }
+                : s,
+            );
+            // Snapping the parent also pulls its descendants — replay their
+            // existing offset so the chain stays intact.
+            const desc = this.flowchart.descendantsOf(droppedId);
+            if (desc.size > 0) {
               this.shapes = this.shapes.map((s) =>
-                s.id === droppedId && s.type === "text"
-                  ? { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } }
-                  : s,
+                desc.has(s.id) ? moveShape(s, dx, dy) : s,
               );
-              // Snapping the parent also pulls its descendants — replay
-              // their existing offset so the chain stays intact.
-              const desc = this.flowchart.descendantsOf(droppedId);
-              if (desc.size > 0) {
-                this.shapes = this.shapes.map((s) =>
-                  desc.has(s.id) ? moveShape(s, dx, dy) : s,
-                );
-              }
             }
           }
         }
@@ -888,6 +914,23 @@ export class DrawingState extends EventTarget {
         return { ...s, strokeColor: hex, backgroundColor: `rgba(${r}, ${g}, ${b}, 0.16)` };
       }
       return s;
+    });
+    this.recordHistory();
+    this.notify("shapes");
+  }
+
+  /**
+   * Apply both foreground and background color to all selected text shapes.
+   * Used by the term-style presets (Concept/Name/Book/Definition) to give a
+   * canvas note the same look as a highlighted chip in the chat panel.
+   * Hex strings bypass the palette so the term colors don't have to be
+   * registered as named entries.
+   */
+  applyTextStyle(fg: string, bg: string) {
+    this.shapes = this.shapes.map((s) => {
+      if (!this.selectedIds.has(s.id)) return s;
+      if (s.type !== "text") return s;
+      return { ...s, color: fg, backgroundColor: bg };
     });
     this.recordHistory();
     this.notify("shapes");

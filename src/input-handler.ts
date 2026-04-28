@@ -6,6 +6,7 @@ import {
 import { screenToCanvas, getShapeBounds } from "./utils";
 import { CLIPBOARD_SCHEMA, encodeSelection, tryDecode, remapForPaste } from "./clipboard-format";
 import { htmlStringToMarkdown } from "./html-to-markdown";
+import { HIGHLIGHT_STYLE } from "./ui/chat-bubble";
 
 export interface InputOptions {
   onShelfDrop?: (index: number, x: number, y: number) => void;
@@ -228,12 +229,32 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     })();
     if (askPayload) {
       try {
-        const parsed = JSON.parse(askPayload) as { sourceShapeIds?: string[]; text?: string };
+        const parsed = JSON.parse(askPayload) as {
+          sourceShapeIds?: string[];
+          text?: string;
+          kind?: "concept" | "name" | "book" | "definition";
+        };
         const text = (parsed.text || "").trim();
         if (text) {
           const before = new Set(state.shapes.map((s) => s.id));
           state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos);
           const newShape = state.shapes.find((s) => !before.has(s.id));
+          // Term chips carry a `kind`. Apply the matching highlight style so
+          // a dropped term keeps the same visual identity it had in the chat
+          // panel (concept = yellow, name = blue, book = purple/italic,
+          // definition = green).
+          if (newShape && parsed.kind) {
+            const styleSpec = HIGHLIGHT_STYLE[parsed.kind];
+            if (styleSpec) {
+              const fg = (styleSpec.color as string) || "#000000";
+              const bg = (styleSpec.background as string) || "#ffffff";
+              state.shapes = state.shapes.map((s) =>
+                s.id === newShape.id && s.type === "text"
+                  ? { ...s, color: fg, backgroundColor: bg }
+                  : s,
+              );
+            }
+          }
           const sourceId = parsed.sourceShapeIds?.[0];
           if (newShape && sourceId) {
             // tryConnect both adds the edge AND computes the auto-position

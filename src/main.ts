@@ -208,9 +208,10 @@ async function boot() {
     const requestId = `ask_${Math.random().toString(36).slice(2)}_${Date.now()}`;
     const chatId = `chat_${Math.random().toString(36).slice(2)}_${Date.now()}`;
 
-    // Open the panel right away. The chat row doesn't exist yet, but
-    // chatId is now in the expanded set so the row will render open the
-    // moment ask-done commits it.
+    // Commit a pending chat (just the user prompt) immediately so the
+    // history list shows the term with an "Asking Claude…" status while
+    // we wait. The same chatId is replaced when ask-done lands.
+    commitChat(sourceShapeIds, chatId, messages.slice());
     chatPanel.openExpanded(chatId);
 
     // One-shot listeners: detach as soon as ask-done or ask-error fires for
