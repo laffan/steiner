@@ -102,28 +102,40 @@ export class DrawingState extends EventTarget {
   // Undo/redo
   private _undo = new UndoManager();
 
-  /** Record current shapes as an undo checkpoint. Call after completed actions. */
-  recordHistory() { this._undo.record(this.shapes); }
+  private _captureSnapshot() {
+    return {
+      shapes: this.shapes,
+      flowEdges: this.flowchart.serialize(),
+      selectedIds: Array.from(this.selectedIds),
+    };
+  }
+
+  private _applySnapshot(snap: { shapes: Shape[]; flowEdges: { id: string; from: string; to: string }[]; selectedIds: string[] }) {
+    this.shapes = snap.shapes;
+    this.flowchart.deserialize(snap.flowEdges);
+    this.selectedIds = new Set(snap.selectedIds);
+    this.flowDropTargetId = null;
+    this.flowHoveredEdgeId = null;
+    this.notify("shapes");
+    this.notify("selectedIds");
+  }
+
+  /** Record current state as an undo checkpoint. Call after completed actions. */
+  recordHistory() { this._undo.record(this._captureSnapshot()); }
 
   /** Initialize undo history (call after loading shapes). */
-  initHistory() { this._undo.init(this.shapes); }
+  initHistory() { this._undo.init(this._captureSnapshot()); }
 
   undo() {
     const snapshot = this._undo.undo();
     if (!snapshot) return;
-    this.shapes = snapshot;
-    this.selectedIds = new Set();
-    this.notify("shapes");
-    this.notify("selectedIds");
+    this._applySnapshot(snapshot);
   }
 
   redo() {
     const snapshot = this._undo.redo();
     if (!snapshot) return;
-    this.shapes = snapshot;
-    this.selectedIds = new Set();
-    this.notify("shapes");
-    this.notify("selectedIds");
+    this._applySnapshot(snapshot);
   }
 
   get canUndo() { return this._undo.canUndo; }
@@ -1079,9 +1091,9 @@ export class DrawingState extends EventTarget {
     this.addTextShapeAtPosition(text, screenToCanvas({ x: window.innerWidth / 2, y: window.innerHeight / 2 }, this.camera));
   }
 
-  addTextShapeAtPosition(text: string, position: Point) {
+  addTextShapeAtPosition(text: string, position: Point, opts: { record?: boolean } = {}) {
     this.shapes = [...this.shapes, { id: generateId(), type: "text", position, text, fontSize: 18, color: "#000000", width: 350 } as TextShape];
-    this.recordHistory();
+    if (opts.record !== false) this.recordHistory();
     this.notify("shapes");
   }
 

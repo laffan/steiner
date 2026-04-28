@@ -237,7 +237,10 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
         const text = (parsed.text || "").trim();
         if (text) {
           const before = new Set(state.shapes.map((s) => s.id));
-          state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos);
+          // Defer history recording: we may also add a flowchart edge and
+          // reposition the shape below — capture the post-edge state as one
+          // undo step.
+          state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos, { record: false });
           const newShape = state.shapes.find((s) => !before.has(s.id));
           // Term chips carry a `kind`. Apply the matching highlight style so
           // a dropped term keeps the same visual identity it had in the chat
@@ -275,12 +278,12 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
                 });
               }
             }
-            // Notify so the canvas-host's debounced save captures the new
-            // shape + edge + repositioned location.
+            state.recordHistory();
             state.notify("shapes");
             // Pan the camera so the auto-positioned node lands in view.
             state.focusShape(newShape.id);
           } else {
+            state.recordHistory();
             state.notify("shapes");
           }
         }
