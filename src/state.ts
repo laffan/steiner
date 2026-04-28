@@ -21,6 +21,7 @@ import {
 } from "./state-helpers";
 import { computePocketLayout, POCKET_ZONE_WIDTH } from "./utils";
 import { FlowchartLayer } from "./flowchart";
+import { TIDY_BUTTON_RADIUS, TIDY_BUTTON_GAP } from "./renderer";
 
 export interface EditingText {
   shapeId: string | null;
@@ -351,6 +352,46 @@ export class DrawingState extends EventTarget {
     if (this._recentEditIds.length > 50) this._recentEditIds.shift();
   }
 
+  /** Re-layout the flowchart subtree rooted at `rootId` via FlowchartLayer.tidy.
+   * Root stays anchored; descendants move so siblings don't overlap. */
+  tidySubtree(rootId: string): void {
+    const layout = this.flowchart.tidy(rootId, this.shapes);
+    if (layout.size === 0) return;
+    const deltas = new Map<string, { dx: number; dy: number }>();
+    for (const [id, tl] of layout) {
+      const s = this.shapes.find((x) => x.id === id);
+      if (!s) continue;
+      const old = getShapeBounds(s);
+      const dx = tl.minX - old.minX;
+      const dy = tl.minY - old.minY;
+      if (dx !== 0 || dy !== 0) deltas.set(id, { dx, dy });
+    }
+    if (deltas.size === 0) return;
+    this.shapes = this.shapes.map((s) => {
+      const d = deltas.get(s.id);
+      return d ? moveShape(s, d.dx, d.dy) : s;
+    });
+    this.recordHistory();
+    this.notify("shapes");
+  }
+
+  /** Find the parent shape whose tidy button contains `screenPt`. */
+  private _hitTestTidyButton(screenPt: Point): string | null {
+    const z = this.camera.zoom;
+    for (const s of this.shapes) {
+      if (s.type !== "text") continue;
+      if (s.pocketed) continue;
+      if (this.flowchart.childrenOf(s.id).length === 0) continue;
+      const b = getShapeBounds(s);
+      const cx = (b.minX + b.maxX) / 2 * z + this.camera.x;
+      const cy = b.minY * z + this.camera.y - TIDY_BUTTON_GAP - TIDY_BUTTON_RADIUS;
+      if (Math.hypot(screenPt.x - cx, screenPt.y - cy) < TIDY_BUTTON_RADIUS) {
+        return s.id;
+      }
+    }
+    return null;
+  }
+
   // === Resize handle hit test ===
   hitTestResizeHandles(canvasPt: Point): { shapeId: string; handle: ResizeHandle } | null {
     const handleRadius = (HANDLE_SIZE / 2) / this.camera.zoom + 2;
@@ -409,6 +450,15 @@ export class DrawingState extends EventTarget {
         this.notify("shapes");
         return;
       }
+    }
+
+    // Click on a tidy button above a parent text shape — runs tidy() on its
+    // subtree. Hit-tested in screen space because the button has a fixed
+    // pixel size regardless of zoom (drawn in screen space by the renderer).
+    const tidyHit = this._hitTestTidyButton(screenPt);
+    if (tidyHit) {
+      this.tidySubtree(tidyHit);
+      return;
     }
 
     // Text tool no longer creates a shape on single-click (it falls through
