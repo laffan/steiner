@@ -923,7 +923,7 @@ export class DrawingState extends EventTarget {
     const mouseX = e.clientX - rect.left, mouseY = e.clientY - rect.top;
     const zoomFactor = e.ctrlKey ? 0.01 : 0.001;
     const delta = -e.deltaY * zoomFactor;
-    const newZoom = Math.min(2, Math.max(0.1, this.camera.zoom * (1 + delta)));
+    const newZoom = Math.min(1, Math.max(0.1, this.camera.zoom * (1 + delta)));
     const scale = newZoom / this.camera.zoom;
     this.camera = {
       x: mouseX - scale * (mouseX - this.camera.x),

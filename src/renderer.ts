@@ -28,6 +28,64 @@ export interface RenderState {
   flowHoveredEdgeId?: string | null;
 }
 
+/** Paint shapes + (optional) background + (optional) flowchart into an
+ *  arbitrary ctx at an arbitrary camera. Skips every piece of editor
+ *  chrome — selection highlights, creating-drag-area preview, selection
+ *  box, pocket tray, pocketed cards, drop-target outlines. Used by the
+ *  export pipeline. The caller owns the ctx's base transform;
+ *  `outWidth`/`outHeight` describe the target surface in CSS pixels. */
+export function renderForExport(
+  ctx: CanvasRenderingContext2D,
+  outWidth: number,
+  outHeight: number,
+  opts: {
+    shapes: Shape[];
+    camera: Camera;
+    imageCache: Map<string, HTMLImageElement>;
+    theme: CanvasTheme;
+    backgroundPattern: "grid" | "dot-grid" | "blank";
+    gridSpacing: number;
+    gridOpacity: number;
+    fontFamily: string;
+    includeBackground: boolean;
+    flowchart?: FlowchartLayer<Shape>;
+  },
+): void {
+  const { shapes, camera, imageCache, theme, backgroundPattern, gridSpacing, gridOpacity, fontFamily, includeBackground, flowchart } = opts;
+
+  if (includeBackground) {
+    ctx.fillStyle = theme.canvasBackground;
+    ctx.fillRect(0, 0, outWidth, outHeight);
+    if (backgroundPattern !== "blank" && gridOpacity > 0) {
+      drawBackground(ctx, camera, outWidth, outHeight, theme.foreground, backgroundPattern, gridSpacing, gridOpacity * 0.8);
+    }
+  }
+
+  ctx.save();
+  ctx.translate(camera.x, camera.y);
+  ctx.scale(camera.zoom, camera.zoom);
+
+  const visible = shapes.filter((s) => !s.pocketed);
+
+  for (const shape of visible) {
+    if (shape.type === "drag-area") drawDragArea(ctx, shape);
+  }
+
+  if (flowchart) {
+    flowchart.setArrowColor(theme.foreground);
+    flowchart.draw(ctx, visible);
+  }
+
+  for (const shape of visible) {
+    if (shape.type === "drag-area") continue;
+    if (shape.type === "draw") drawStroke(ctx, shape.points, shape.color, shape.width);
+    else if (shape.type === "text") drawTextShape(ctx, shape, theme, fontFamily);
+    else if (shape.type === "image") drawImageShape(ctx, shape, imageCache, false);
+  }
+
+  ctx.restore();
+}
+
 export function render(canvas: HTMLCanvasElement, state: RenderState): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;

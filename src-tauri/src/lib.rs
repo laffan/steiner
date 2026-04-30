@@ -520,6 +520,92 @@ fn write_text_file(path: String, contents: String) -> Result<(), String> {
     fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+/// Write `bytes` to `path`. Used by the export pipeline (and any future
+/// binary-write callers) because the @tauri-apps/plugin-fs writer
+/// truncates 0-byte files on iOS — routing binary writes through Rust
+/// avoids that. Path normalization handles iOS's percent-encoded
+/// `file://` URLs from the document picker.
+///
+/// **Containment.** The Tauri dialog plugin already constrains the user
+/// to paths reachable via the system picker, but this command is also
+/// invokable directly, so we add defence-in-depth: the resolved path
+/// must live under home / app-data / cache / temp. Anything else is
+/// rejected before `fs::write` runs.
+#[tauri::command]
+fn write_binary_file(app: AppHandle, path: String, bytes: Vec<u8>) -> Result<(), String> {
+    let resolved = normalize_dialog_path(&path);
+    let abs = std::path::PathBuf::from(&resolved);
+    ensure_path_in_safe_root(&app, &abs)?;
+    fs::write(&abs, &bytes).map_err(|e| format!("{} (path: {})", e, resolved))
+}
+
+fn ensure_path_in_safe_root(app: &AppHandle, path: &std::path::Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("write_binary_file: path must be absolute: {}", path.display()));
+    }
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!("write_binary_file: '..' in path: {}", path.display()));
+        }
+    }
+    let p = app.path();
+    let mut allowed: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(d) = p.home_dir() { allowed.push(d); }
+    if let Ok(d) = p.app_data_dir() { allowed.push(d); }
+    if let Ok(d) = p.app_cache_dir() { allowed.push(d); }
+    if let Ok(d) = p.document_dir() { allowed.push(d); }
+    if let Ok(d) = p.download_dir() { allowed.push(d); }
+    if let Ok(d) = p.desktop_dir() { allowed.push(d); }
+    allowed.push(std::env::temp_dir());
+    #[cfg(target_os = "macos")]
+    {
+        allowed.push(std::path::PathBuf::from("/tmp"));
+        allowed.push(std::path::PathBuf::from("/private/tmp"));
+        allowed.push(std::path::PathBuf::from("/private/var/folders"));
+    }
+    for root in &allowed {
+        if path.starts_with(root) { return Ok(()); }
+    }
+    Err(format!(
+        "write_binary_file: refusing to write outside home/data/temp roots: {}",
+        path.display()
+    ))
+}
+
+/// Strip a `file://` prefix (iOS document picker URLs) and percent-decode
+/// the remainder. A bare filesystem path passes through untouched.
+fn normalize_dialog_path(raw: &str) -> String {
+    let trimmed = raw.strip_prefix("file://").unwrap_or(raw);
+    percent_decode(trimmed)
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 fn export_session_markdown(app: AppHandle, id: String) -> Result<String, String> {
     let s = read_session(&app, &id)?;
@@ -1145,6 +1231,7 @@ pub fn run() {
             delete_session,
             export_session_markdown,
             write_text_file,
+            write_binary_file,
             send_message,
             ask_claude_stream,
             dropbox::dropbox_exchange_code,

@@ -10,7 +10,7 @@ interface Options {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onOpenSettings: () => void;
-  onExportPdf: (id: string) => void;
+  onExport: (id: string) => void;
   getActiveId: () => string | null;
 }
 
@@ -149,7 +149,7 @@ export function createSessionsSidebar(opts: Options) {
       await api.setSessionArchived(m.id, !archived);
       await reload();
     });
-    const pdfBtn = makeRowBtn("PDF", () => opts.onExportPdf(m.id));
+    const exportBtn = makeRowBtn("Export", () => opts.onExport(m.id));
     const delBtn = makeRowBtn("Delete", async () => {
       if (!confirm(`Delete "${m.title}"? This is permanent.`)) return;
       await api.deleteSession(m.id);
@@ -158,7 +158,7 @@ export function createSessionsSidebar(opts: Options) {
     delBtn.style.color = "#a33";
 
     actions.appendChild(renameBtn);
-    actions.appendChild(pdfBtn);
+    actions.appendChild(exportBtn);
     actions.appendChild(archiveBtn);
     actions.appendChild(delBtn);
 

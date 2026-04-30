@@ -501,6 +501,29 @@ export class FlowchartLayer<S extends FlowNode> {
   setArrowColor(color: string): void {
     this.cfg.arrowColor = color;
   }
+
+  /** Geometry-only edge descriptions — for renderers that aren't CanvasRenderingContext2D
+   *  (e.g. the PDF export path emits vector ops). Returns one entry per
+   *  edge whose endpoints are both present in `shapes`. */
+  describeEdges(shapes: S[]): {
+    p0: Pt; cp1: Pt; cp2: Pt; p3: Pt; tip: Pt; sign: number;
+    color: string; width: number; arrowHeadSize: number;
+  }[] {
+    const byId = new Map<string, S>();
+    for (const s of shapes) byId.set(s.id, s);
+    const out: ReturnType<FlowchartLayer<S>["describeEdges"]> = [];
+    for (const e of this.edges) {
+      const a = byId.get(e.from);
+      const b = byId.get(e.to);
+      if (!a || !b) continue;
+      const g = this.geometry(this.cfg.getBounds(a), this.cfg.getBounds(b));
+      out.push({
+        p0: g.p0, cp1: g.cp1, cp2: g.cp2, p3: g.p3, tip: g.tip, sign: g.sign,
+        color: this.cfg.arrowColor, width: this.cfg.arrowWidth, arrowHeadSize: this.cfg.arrowHeadSize,
+      });
+    }
+    return out;
+  }
 }
 
 function genId(): string {

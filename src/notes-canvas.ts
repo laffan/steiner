@@ -134,6 +134,10 @@ export class NotesCanvas {
     return this.state.shapes;
   }
 
+  getImageCache(): Map<string, HTMLImageElement> {
+    return this._imageCache;
+  }
+
   on(event: string, handler: (detail: unknown) => void) {
     this.state.addEventListener(event, ((e: CustomEvent) => handler(e.detail)) as EventListener);
   }

@@ -40,7 +40,7 @@ async function boot() {
       await sessions.reload();
     },
     onOpenSettings: () => settings.open(() => sessions.refreshSettings()),
-    onExportPdf: (id) => exportSessionPdf(id),
+    onExport: (id) => exportSession(id),
     getActiveId: () => activeSession?.id || null,
   });
 
@@ -324,18 +324,12 @@ async function boot() {
     adoptSession(s);
   }
 
-  async function exportSessionPdf(id: string) {
-    // Switch to the target session so its canvas can be snapped.
+  async function exportSession(id: string) {
     if (activeSession?.id !== id) {
       await loadSession(id);
     }
     if (!activeSession) return;
-    const dataUrl = await canvasHost.snapToPng();
-    if (!dataUrl) {
-      alert("This session is empty — nothing to export.");
-      return;
-    }
-    showExportModal({ title: activeSession.title || "Session", dataUrl });
+    showExportModal({ title: activeSession.title || "Session", canvas: canvasHost.getCanvas() });
   }
 }
 
