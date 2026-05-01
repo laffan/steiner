@@ -147,6 +147,22 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
           }
         }
         break;
+      case "v": case "V":
+        // The browser only fires `paste` reliably when an editable element
+        // (input/textarea/contenteditable) is focused. The canvas page has no
+        // such element by default, so Cmd+V silently no-ops. Read the
+        // clipboard ourselves via the async API; the existing `paste` event
+        // listener stays as a fallback for when a paste *is* dispatched
+        // (e.g. native Edit > Paste menu in Tauri), and the two paths dedupe
+        // on `lastPasteAt`.
+        if (e.metaKey || e.ctrlKey) {
+          if (document.activeElement instanceof HTMLInputElement) break;
+          if (document.activeElement instanceof HTMLTextAreaElement) break;
+          if (state.editingText) break;
+          e.preventDefault();
+          void asyncCanvasPaste(state, canvas);
+        }
+        break;
     }
   }) as unknown as (e: HTMLElementEventMap["keydown"]) => void);
 
@@ -162,19 +178,22 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     }
   }) as unknown as (e: HTMLElementEventMap["keyup"]) => void);
 
-  // Paste
+  // Paste — runs when the browser dispatches a `paste` event (typically only
+  // when an editable element is focused). The Cmd+V keydown handler above
+  // covers the canvas-focused case via the async clipboard API. Both share
+  // `lastPasteAt` to avoid double-pasting if both fire.
   on(document as unknown as HTMLElement, "paste", (async (e: ClipboardEvent) => {
     if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) return;
     if (state.editingText) return;
     e.preventDefault();
+    if (recentlyPasted()) return;
     const cd = e.clipboardData;
     if (!cd) return;
 
-    // Canvas-clipboard envelope (shared with Hush): detect first, paste shapes
-    // + flowchart edges with remapped IDs.
     const rawText = extractTextFromDataTransfer(cd);
     const env = tryDecode(rawText);
     if (env) {
+      markPasted();
       pasteEnvelope(env, state, canvas);
       return;
     }
@@ -183,6 +202,7 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
       if (item.type.startsWith("image/")) {
         const file = item.getAsFile();
         if (file) {
+          markPasted();
           const dataUrl = await fileToDataUrl(file);
           const dims = await getImageDimensions(dataUrl);
           state.addImageShape(dataUrl, file.name, dims.width, dims.height);
@@ -190,7 +210,10 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
         }
       }
     }
-    if (rawText && rawText.trim()) state.addTextShapeAtCenter(cleanLineBreaks(rawText));
+    if (rawText && rawText.trim()) {
+      markPasted();
+      state.addTextShapeAtCenter(cleanLineBreaks(rawText));
+    }
   }) as unknown as (e: HTMLElementEventMap["paste"]) => void);
 
   // Drag/drop — capture phase so preventDefault() runs before the browser
@@ -337,13 +360,84 @@ function copySelectionToClipboard(state: import("./state").DrawingState): boolea
   const selected = state.shapes.filter((s) => state.selectedIds.has(s.id));
   if (selected.length === 0) return false;
   const payload = encodeSelection(selected, state.flowchart.edges);
-  // Best-effort clipboard write. The async API requires a secure context;
-  // Tauri's webview qualifies. If it fails (older WebView, denied permission),
-  // we silently no-op rather than trapping the keyboard shortcut.
+  // Best-effort clipboard write. The async API requires a secure context
+  // (Tauri's webview, https://, or localhost). Failures are swallowed rather
+  // than trapping the keyboard shortcut — there's no good fallback we can
+  // run synchronously inside a keydown handler.
   void navigator.clipboard.writeText(payload).catch(() => {
     /* clipboard unavailable */
   });
   return true;
+}
+
+// Dedupe between the keydown Cmd+V path and the document `paste` listener:
+// browsers vary on whether they dispatch `paste` when nothing editable is
+// focused, so we always run the keydown path and skip the paste-event work
+// if it already ran (or vice-versa).
+let lastPasteAt = 0;
+const PASTE_DEDUP_MS = 400;
+function markPasted() {
+  lastPasteAt = Date.now();
+}
+function recentlyPasted(): boolean {
+  return Date.now() - lastPasteAt < PASTE_DEDUP_MS;
+}
+
+async function asyncCanvasPaste(
+  state: import("./state").DrawingState,
+  canvas: HTMLCanvasElement,
+) {
+  if (recentlyPasted()) return;
+  let text = "";
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    // Permission denied or insecure context. The paste event listener may
+    // still fire and pick this up; nothing more we can do here.
+    return;
+  }
+
+  const env = tryDecode(text);
+  if (env) {
+    markPasted();
+    pasteEnvelope(env, state, canvas);
+    return;
+  }
+
+  // navigator.clipboard.read() returns image blobs on browsers that support
+  // it (Chrome/Edge — Safari only on macOS 13.1+). Best-effort; failures
+  // fall through to the plain-text path.
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const type of item.types) {
+        if (type.startsWith("image/")) {
+          const blob = await item.getType(type);
+          const dataUrl = await blobToDataUrl(blob);
+          const dims = await getImageDimensions(dataUrl);
+          markPasted();
+          state.addImageShape(dataUrl, "pasted-image", dims.width, dims.height);
+          return;
+        }
+      }
+    }
+  } catch {
+    // clipboard.read() unsupported — that's fine, fall through.
+  }
+
+  if (text && text.trim()) {
+    markPasted();
+    state.addTextShapeAtCenter(cleanLineBreaks(text));
+  }
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(new Error("Failed to read blob"));
+    r.readAsDataURL(blob);
+  });
 }
 
 function pasteEnvelope(
