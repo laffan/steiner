@@ -38,10 +38,17 @@ interface BubbleArgs {
    *  bubble's own rendering — see makeChatBubble. */
   segments?: Segment[];
   sourceShapeIds: string[];
+  /** Render as an error bubble (red border + "Ask Claude failed" header).
+   *  Set by main.ts when ask-error fires or the response was empty. */
+  error?: boolean;
 }
 
 export function makeChatBubble(args: BubbleArgs): HTMLElement {
-  const { role, content, sourceShapeIds } = args;
+  const { role, content, sourceShapeIds, error } = args;
+
+  if (role === "assistant" && error) {
+    return makeErrorBubble(content);
+  }
 
   const bubble = h("div", {
     style: {
@@ -108,4 +115,39 @@ export function makeChatBubble(args: BubbleArgs): HTMLElement {
   }
 
   return bubble;
+}
+
+function makeErrorBubble(message: string): HTMLElement {
+  const text = (message || "").trim() || "Ask Claude failed.";
+  return h("div", {
+    style: {
+      maxWidth: "100%",
+      padding: "8px 12px",
+      borderRadius: "12px",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      fontSize: "13px",
+      lineHeight: "1.5",
+      background: "#fdecea",
+      color: "#7a1f17",
+      border: "1px solid #f3b6ad",
+      alignSelf: "flex-start",
+      userSelect: "text",
+      webkitUserSelect: "text",
+    },
+    children: [
+      h("div", {
+        style: {
+          fontWeight: "600",
+          fontSize: "11px",
+          textTransform: "uppercase",
+          letterSpacing: "0.5px",
+          marginBottom: "4px",
+          color: "#a3271c",
+        },
+        children: ["⚠ Ask Claude failed"],
+      }),
+      h("div", { children: [text] }),
+    ],
+  });
 }

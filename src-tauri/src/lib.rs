@@ -1012,6 +1012,20 @@ async fn ask_claude_stream(
         })
         .unwrap_or_else(|| accumulated.clone());
 
+    // The Anthropic stream can complete cleanly with no `content_block_delta`
+    // events at all (e.g. the model went straight to a stop with no output, a
+    // schema-only response that parsed to zero segments, etc.). Without this
+    // guard the frontend would display an empty chat bubble and the user
+    // would have no idea what happened.
+    if plain_text.trim().is_empty() {
+        let err = "Claude returned no text in its response. Try asking again.".to_string();
+        let _ = app.emit(
+            "ask-error",
+            serde_json::json!({ "request_id": request_id, "message": err }),
+        );
+        return Err(err);
+    }
+
     let _ = app.emit(
         "ask-done",
         serde_json::json!({

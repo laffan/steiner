@@ -22,6 +22,10 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   segments?: Segment[];
+  /** Marks an assistant message that represents a failure (API error, empty
+   *  response, etc.) so the bubble renders as an error instead of silently
+   *  showing nothing or a confusing markdown blob. */
+  error?: boolean;
 }
 
 export interface ShapeChat {
