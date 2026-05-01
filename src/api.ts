@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { IS_TAURI } from "./runtime";
+import type { Camera } from "./types";
 import { webBackend } from "./web-api";
 
 /** A persisted message inside a top-level Session (currently not surfaced in UI). */
@@ -51,6 +52,9 @@ export interface CanvasState {
   flow_edges?: unknown;
   shape_chats?: Record<string, ShapeChat[]>;
   transcripts?: TranscriptEntry[];
+  /** Persisted camera (pan + zoom) so refreshing or reopening restores the
+   *  user's view. Undefined on legacy sessions; loader falls back to origin. */
+  camera?: Camera;
 }
 
 export interface Session {

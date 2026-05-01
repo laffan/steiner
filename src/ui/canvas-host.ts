@@ -1,11 +1,14 @@
 import { NotesCanvas } from "../notes-canvas";
-import type { Shape } from "../types";
+import type { Camera, Shape } from "../types";
 import type { FlowEdge } from "../flowchart";
 import { h } from "./dom-helpers";
 
 export interface CanvasSnapshot {
   shapes: Shape[];
   flow_edges: FlowEdge[];
+  /** Pan + zoom. Persisted so refreshing or reopening a session restores
+   *  the user's view instead of jumping back to the origin. */
+  camera?: Camera;
 }
 
 interface Options {
@@ -32,24 +35,31 @@ export function createCanvasHost(opts: Options) {
   let suppressSave = false;
 
   canvas.state.addEventListener("change", (e: Event) => {
-    const detail = (e as CustomEvent).detail as { keys?: string[] } | undefined;
-    if (!detail?.keys?.includes("shapes")) return;
+    const keys = (e as CustomEvent).detail?.keys as string[] | undefined;
+    // Save on shape edits AND camera moves (pan/zoom). Both notify through
+    // the same change event with their key in `keys`; a single debounce
+    // coalesces a burst of pan-frames into one write.
+    if (!keys || (!keys.includes("shapes") && !keys.includes("camera"))) return;
     if (suppressSave) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      opts.onChange({
-        shapes: canvas.getShapes(),
-        flow_edges: canvas.state.flowchart.serialize(),
-      });
+      opts.onChange(snapshot());
     }, SAVE_DEBOUNCE_MS);
   });
 
-  function load(snapshot: CanvasSnapshot | null) {
+  function load(snap: CanvasSnapshot | null) {
     suppressSave = true;
     try {
-      canvas.loadShapes(snapshot?.shapes || []);
-      canvas.state.flowchart.deserialize(snapshot?.flow_edges || []);
+      canvas.loadShapes(snap?.shapes || []);
+      canvas.state.flowchart.deserialize(snap?.flow_edges || []);
+      // Default to origin when a session has no saved camera (legacy data
+      // or a freshly-created session); otherwise the previous session's
+      // camera would bleed through and disorient the user.
+      canvas.state.camera = snap?.camera
+        ? { x: snap.camera.x, y: snap.camera.y, zoom: snap.camera.zoom }
+        : { x: 0, y: 0, zoom: 1 };
+      canvas.state.notify("camera");
     } finally {
       setTimeout(() => {
         suppressSave = false;
@@ -61,6 +71,7 @@ export function createCanvasHost(opts: Options) {
     return {
       shapes: canvas.getShapes(),
       flow_edges: canvas.state.flowchart.serialize(),
+      camera: { ...canvas.state.camera },
     };
   }
 
