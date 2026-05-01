@@ -4,6 +4,7 @@
 // anywhere on the panel to append a transcript.
 
 import type { Segment, ShapeChat, TranscriptEntry } from "../api";
+import { enableTouchDrag } from "./canvas-drag-touch";
 import { h, clearChildren } from "./dom-helpers";
 import { makeChatBubble, HIGHLIGHT_STYLE, TERM_KINDS } from "./chat-bubble";
 
@@ -417,6 +418,12 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
       );
       e.dataTransfer.effectAllowed = "copy";
     });
+    // Touch fallback — iOS doesn't fire HTML5 drag for finger input.
+    enableTouchDrag(chip, () => ({
+      text: dragText,
+      sourceShapeIds: [],
+      kind: t.kind,
+    }));
     chip.addEventListener("click", (e) => {
       e.stopPropagation();
       if (sourceExists) opts.onFocusShape(t.sourceShapeId);

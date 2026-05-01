@@ -8,6 +8,15 @@ import { CLIPBOARD_SCHEMA, encodeSelection, tryDecode, remapForPaste } from "./c
 import { htmlStringToMarkdown } from "./html-to-markdown";
 import { HIGHLIGHT_STYLE } from "./ui/chat-bubble";
 
+/** Same shape as the JSON inside `application/x-steiner-ask`. Reused by the
+ *  touch-drag path (which can't read DataTransfer because synthetic drops
+ *  don't carry one). */
+export interface AskDropPayload {
+  text: string;
+  sourceShapeIds?: string[];
+  kind?: "concept" | "name" | "book" | "definition";
+}
+
 export interface InputOptions {
   onShelfDrop?: (index: number, x: number, y: number) => void;
 }
@@ -252,65 +261,11 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     })();
     if (askPayload) {
       try {
-        const parsed = JSON.parse(askPayload) as {
-          sourceShapeIds?: string[];
-          text?: string;
-          kind?: "concept" | "name" | "book" | "definition";
-        };
-        const text = (parsed.text || "").trim();
-        if (text) {
-          const before = new Set(state.shapes.map((s) => s.id));
-          // Defer history recording: we may also add a flowchart edge and
-          // reposition the shape below — capture the post-edge state as one
-          // undo step.
-          state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos, { record: false });
-          const newShape = state.shapes.find((s) => !before.has(s.id));
-          // Term chips carry a `kind`. Apply the matching highlight style so
-          // a dropped term keeps the same visual identity it had in the chat
-          // panel (concept = yellow, name = blue, book = purple/italic,
-          // definition = green).
-          if (newShape && parsed.kind) {
-            const styleSpec = HIGHLIGHT_STYLE[parsed.kind];
-            if (styleSpec) {
-              const fg = (styleSpec.color as string) || "#000000";
-              const bg = (styleSpec.background as string) || "#ffffff";
-              state.shapes = state.shapes.map((s) =>
-                s.id === newShape.id && s.type === "text"
-                  ? { ...s, color: fg, backgroundColor: bg }
-                  : s,
-              );
-            }
-          }
-          const sourceId = parsed.sourceShapeIds?.[0];
-          if (newShape && sourceId) {
-            // tryConnect both adds the edge AND computes the auto-position
-            // (right of parent, stacked below existing siblings). Translate
-            // the new shape from the drop point to that slot.
-            const newTL = state.flowchart.tryConnect(newShape.id, sourceId, state.shapes);
-            if (newTL) {
-              const oldBounds = getShapeBounds(newShape);
-              const dx = newTL.minX - oldBounds.minX;
-              const dy = newTL.minY - oldBounds.minY;
-              if (dx !== 0 || dy !== 0) {
-                state.shapes = state.shapes.map((s) => {
-                  if (s.id !== newShape.id) return s;
-                  if (s.type === "text" || s.type === "image" || s.type === "drag-area") {
-                    return { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } };
-                  }
-                  return s;
-                });
-              }
-            }
-            state.recordHistory();
-            state.notify("shapes");
-            // Pan the camera so the auto-positioned node lands in view.
-            state.focusShape(newShape.id);
-          } else {
-            state.recordHistory();
-            state.notify("shapes");
-          }
+        const parsed = JSON.parse(askPayload) as AskDropPayload;
+        if ((parsed.text || "").trim()) {
+          applyAskPayload(state, parsed, dropPos);
+          return;
         }
-        return;
       } catch {
         // Fall through to normal handlers if payload is malformed.
       }
@@ -353,7 +308,90 @@ export function bindInputEvents(canvas: HTMLCanvasElement, state: DrawingState, 
     if (text && text.trim()) state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos);
   }) as unknown as (e: HTMLElementEventMap["drop"]) => void, { capture: true });
 
+  // Touch-drag fallback for iPad/web. canvas-drag-touch.ts dispatches this
+  // when a finger drag from the chat panel ends over the canvas — synthetic
+  // DataTransfer doesn't exist, so we route the same payload through the
+  // shared applyAskPayload helper.
+  on(window as unknown as HTMLElement, "steiner-touch-drop", ((e: CustomEvent<{
+    payload: AskDropPayload;
+    clientX: number;
+    clientY: number;
+  }>) => {
+    const detail = e.detail;
+    if (!detail) return;
+    const rect = canvas.getBoundingClientRect();
+    if (
+      detail.clientX < rect.left || detail.clientX > rect.right ||
+      detail.clientY < rect.top || detail.clientY > rect.bottom
+    ) return;
+    const dropPos = screenToCanvas(
+      { x: detail.clientX - rect.left, y: detail.clientY - rect.top },
+      state.camera,
+    );
+    if ((detail.payload.text || "").trim()) {
+      applyAskPayload(state, detail.payload, dropPos);
+    }
+  }) as unknown as (e: HTMLElementEventMap["steiner-touch-drop"]) => void);
+
   return () => { for (const fn of cleanups) fn(); };
+}
+
+/**
+ * Drop a text payload from the chat panel onto the canvas. Adds a text shape,
+ * applies the kind-specific highlight style if any, and (when a source shape
+ * is provided) connects it as a flowchart child via tryConnect — which both
+ * computes the auto-position right of the parent and inserts the edge.
+ *
+ * Shared between the HTML5 `drop` handler and the touch-drag CustomEvent.
+ */
+function applyAskPayload(
+  state: import("./state").DrawingState,
+  payload: AskDropPayload,
+  dropPos: { x: number; y: number },
+): void {
+  const text = (payload.text || "").trim();
+  if (!text) return;
+  const before = new Set(state.shapes.map((s) => s.id));
+  // Defer history recording until after any flowchart edge / reposition so
+  // the whole drop is a single undo step.
+  state.addTextShapeAtPosition(cleanLineBreaks(text), dropPos, { record: false });
+  const newShape = state.shapes.find((s) => !before.has(s.id));
+  if (newShape && payload.kind) {
+    const styleSpec = HIGHLIGHT_STYLE[payload.kind];
+    if (styleSpec) {
+      const fg = (styleSpec.color as string) || "#000000";
+      const bg = (styleSpec.background as string) || "#ffffff";
+      state.shapes = state.shapes.map((s) =>
+        s.id === newShape.id && s.type === "text"
+          ? { ...s, color: fg, backgroundColor: bg }
+          : s,
+      );
+    }
+  }
+  const sourceId = payload.sourceShapeIds?.[0];
+  if (newShape && sourceId) {
+    const newTL = state.flowchart.tryConnect(newShape.id, sourceId, state.shapes);
+    if (newTL) {
+      const oldBounds = getShapeBounds(newShape);
+      const dx = newTL.minX - oldBounds.minX;
+      const dy = newTL.minY - oldBounds.minY;
+      if (dx !== 0 || dy !== 0) {
+        state.shapes = state.shapes.map((s) => {
+          if (s.id !== newShape.id) return s;
+          if (s.type === "text" || s.type === "image" || s.type === "drag-area") {
+            return { ...s, position: { x: s.position.x + dx, y: s.position.y + dy } };
+          }
+          return s;
+        });
+      }
+    }
+    state.recordHistory();
+    state.notify("shapes");
+    state.focusShape(newShape.id);
+  } else {
+    state.recordHistory();
+    state.notify("shapes");
+  }
 }
 
 function copySelectionToClipboard(state: import("./state").DrawingState): boolean {
