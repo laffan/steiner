@@ -1,5 +1,7 @@
 import type { Segment, SegmentKind } from "../api";
+import { enableTouchDrag } from "./canvas-drag-touch";
 import { h } from "./dom-helpers";
+import { renderMarkdownToFragment } from "./markdown-render";
 
 const DRAG_MIME = "application/x-steiner-ask";
 
@@ -100,7 +102,9 @@ export function makeChatBubble(args: BubbleArgs): HTMLElement {
       maxWidth: "100%",
       padding: "8px 12px",
       borderRadius: "12px",
-      whiteSpace: "pre-wrap",
+      // pre-wrap is dropped for assistants — markdown rendering owns its own
+      // whitespace. User bubbles keep it so multi-line prompts stay readable.
+      whiteSpace: role === "user" ? "pre-wrap" : "normal",
       wordBreak: "break-word",
       fontSize: "13px",
       lineHeight: "1.5",
@@ -113,27 +117,39 @@ export function makeChatBubble(args: BubbleArgs): HTMLElement {
     },
   });
 
-  if (role === "user" || !segments || segments.length === 0) {
+  if (role === "user") {
     bubble.textContent = content;
-  } else {
+  } else if (segments && segments.length > 0) {
+    // Tauri build path: backend-classified segments render with chips for
+    // concept/name/book/definition. Markdown isn't applied because segments
+    // already encode the structured emphasis.
     for (let i = 0; i < segments.length; i++) {
       bubble.appendChild(renderSegment(segments, i, sourceShapeIds));
     }
+  } else {
+    // Web build path (and any segment-less Tauri response): render markdown.
+    bubble.appendChild(renderMarkdownToFragment(content));
   }
 
   if (role === "assistant") {
-    bubble.title = "Drag a highlighted phrase, or select text and drag";
-    // Selection-drag fallback: dragstart fires on the bubble when the user
-    // drags a text selection that doesn't originate inside a draggable span.
+    // Drag the bubble's full content onto the canvas. Mouse uses HTML5 drag
+    // (native ghost preview); touch goes through enableTouchDrag below since
+    // iOS doesn't fire HTML5 drag events for touch input.
+    bubble.setAttribute("draggable", "true");
+    bubble.style.cursor = "grab";
+    bubble.title = "Drag onto the canvas — or select a phrase first to drag just that";
     bubble.addEventListener("dragstart", (e: DragEvent) => {
       if (!e.dataTransfer) return;
+      // If the user has selected a sub-string, drag just that. Otherwise
+      // drag the whole message — the previous behavior of cancelling drag
+      // when nothing was selected meant plain-text bubbles felt broken on
+      // mouse and didn't work at all on touch.
       const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || !sel.anchorNode || !bubble.contains(sel.anchorNode)) {
-        e.preventDefault();
-        return;
-      }
-      const text = sel.toString();
-      if (!text.trim()) {
+      const hasSelection =
+        sel && !sel.isCollapsed && sel.anchorNode && bubble.contains(sel.anchorNode);
+      const picked = hasSelection ? sel!.toString().trim() : "";
+      const text = picked || content.trim();
+      if (!text) {
         e.preventDefault();
         return;
       }
@@ -143,6 +159,16 @@ export function makeChatBubble(args: BubbleArgs): HTMLElement {
         JSON.stringify({ sourceShapeIds, text }),
       );
       e.dataTransfer.effectAllowed = "copy";
+    });
+
+    enableTouchDrag(bubble, () => {
+      const sel = window.getSelection();
+      const hasSelection =
+        sel && !sel.isCollapsed && sel.anchorNode && bubble.contains(sel.anchorNode);
+      const picked = hasSelection ? sel!.toString().trim() : "";
+      const text = picked || content.trim();
+      if (!text) return null;
+      return { text, sourceShapeIds };
     });
   }
 
@@ -202,5 +228,30 @@ function renderSegment(
     e.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload));
     e.dataTransfer.effectAllowed = "copy";
   });
+
+  // Touch path — same payload-derivation logic as the dragstart handler
+  // above, called once at pointerdown. Mirrors mouse behavior on iPad.
+  enableTouchDrag(span, () => {
+    let text = dragTextForSegment(segments, index);
+    let attachKind = true;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.anchorNode) {
+      const startsHere = span.contains(sel.anchorNode);
+      const endsHere = sel.focusNode ? span.contains(sel.focusNode) : false;
+      const picked = sel.toString().trim();
+      if (picked && (startsHere || endsHere)) {
+        text = picked;
+        if (!(startsHere && endsHere)) attachKind = false;
+      }
+    }
+    if (!text.trim()) return null;
+    const out: { text: string; sourceShapeIds: string[]; kind?: typeof kind } = {
+      text,
+      sourceShapeIds,
+    };
+    if (attachKind) out.kind = kind;
+    return out;
+  });
+
   return span;
 }
