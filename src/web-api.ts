@@ -21,6 +21,7 @@ import type {
   CanvasState,
   ChatMessage,
   DropboxStatus,
+  Segment,
   Session,
   SessionMeta,
   Settings,
@@ -131,6 +132,81 @@ function updateIndexEntry(id: string, mut: (m: SessionMeta) => void): void {
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
+/**
+ * Tool that Claude calls alongside its answer to mark up key terms. We force
+ * the call via tool_choice so the response always contains structured term
+ * data; the answer text comes through as preceding text content blocks.
+ *
+ * The Terms tab in the chat panel reads `message.segments` to populate its
+ * filter chips (concept / name / book). Without these tool inputs the Terms
+ * tab stays empty on the web build.
+ */
+const HIGHLIGHT_TOOL = {
+  name: "highlight_terms",
+  description:
+    "Identify the key terms in your answer that the user might want to drag onto their notebook canvas as separate nodes. Categorize each as a concept, a person's name, or a book title.",
+  input_schema: {
+    type: "object",
+    properties: {
+      concepts: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Conceptual terms or ideas central to your answer (e.g. 'natural selection', 'general relativity').",
+      },
+      names: {
+        type: "array",
+        items: { type: "string" },
+        description: "Names of people you mention (e.g. 'Albert Einstein').",
+      },
+      books: {
+        type: "array",
+        items: { type: "string" },
+        description: "Book / paper titles you mention (e.g. 'The Origin of Species').",
+      },
+    },
+    required: ["concepts", "names", "books"],
+  },
+};
+
+interface AnthropicContentBlock {
+  type: string;
+  text?: string;
+  name?: string;
+  input?: { concepts?: string[]; names?: string[]; books?: string[] };
+}
+
+/**
+ * Build segment metadata from a (concept / name / book) classification. The
+ * bubble doesn't render these as inline chips — see chat-bubble.ts; segments
+ * exist purely so extractTerms() in chat-history-panel.ts can populate the
+ * Terms tab. So we just emit one segment per term and skip the work of
+ * splitting the response text around them.
+ */
+function buildTermSegments(input: {
+  concepts?: string[];
+  names?: string[];
+  books?: string[];
+}): Segment[] {
+  const out: Segment[] = [];
+  const seen = new Set<string>();
+  const push = (kind: Segment["kind"], list?: string[]) => {
+    if (!list) return;
+    for (const t of list) {
+      const trimmed = (t || "").trim();
+      if (!trimmed) continue;
+      const key = `${kind}:${trimmed.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ kind, text: trimmed });
+    }
+  };
+  push("concept", input.concepts);
+  push("name", input.names);
+  push("book", input.books);
+  return out;
+}
+
 async function askClaudeViaAnthropic(
   requestId: string,
   messages: ChatMessage[],
@@ -160,6 +236,10 @@ async function askClaudeViaAnthropic(
       body: JSON.stringify({
         model: model || DEFAULT_MODEL,
         max_tokens: 4096,
+        tools: [HIGHLIGHT_TOOL],
+        // Force the tool call so the response always carries term metadata.
+        // The answer text still comes through in preceding `text` blocks.
+        tool_choice: { type: "tool", name: "highlight_terms" },
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
       }),
     });
@@ -168,12 +248,19 @@ async function askClaudeViaAnthropic(
       const body = await r.text().catch(() => "");
       throw new Error(`Anthropic API ${r.status}${body ? `: ${body}` : ""}`);
     }
-    const data = (await r.json()) as { content?: { type: string; text?: string }[] };
-    const text = (data.content || [])
+    const data = (await r.json()) as { content?: AnthropicContentBlock[] };
+    const blocks = data.content || [];
+    const text = blocks
       .filter((b) => b.type === "text")
       .map((b) => b.text || "")
       .join("");
-    emit("ask-done", { request_id: requestId, text, segments: null });
+    const toolBlock = blocks.find(
+      (b) => b.type === "tool_use" && b.name === "highlight_terms",
+    );
+    const segments = toolBlock?.input
+      ? buildTermSegments(toolBlock.input)
+      : null;
+    emit("ask-done", { request_id: requestId, text, segments });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     emit("ask-error", { request_id: requestId, message });

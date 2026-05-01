@@ -3,6 +3,7 @@ import type { Shape } from "../types";
 import { getShapeBounds } from "../utils";
 import { h, clearChildren } from "./dom-helpers";
 import { icon } from "./icons";
+import { renderShelfLabel } from "./markdown-render";
 
 interface ShelfNode {
   id: string; type: string; label: string; excerpt: string;
@@ -285,7 +286,9 @@ export function createShelfPanel(
             setTimeout(() => ghost.remove(), 0);
           }
         });
-        row.appendChild(h("span", { text, style: { flex: "1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }));
+        const labelEl = h("span", { style: { flex: "1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
+        labelEl.appendChild(renderShelfLabel(text));
+        row.appendChild(labelEl);
         row.appendChild(h("button", { text: "\u00d7", style: { border: "none", background: "none", cursor: "pointer", fontSize: "10px", padding: "0", opacity: "0.5", color: muted }, onClick: () => opts.onRemoveShelfItem(i) }));
         section.appendChild(row);
       });
@@ -319,7 +322,10 @@ export function createShelfPanel(
     const fg = theme.foreground;
     const muted = theme.variant === "dark" ? "rgba(255,255,255,0.4)" : "#999";
     const subtleBorder = theme.variant === "dark" ? "rgba(255,255,255,0.04)" : "#f8f9fa";
-    const row = h("div", { style: { display: "flex", alignItems: "center", gap: "4px", padding: "4px 0", cursor: "pointer", fontSize: "13px", borderBottom: `1px solid ${subtleBorder}`, paddingLeft: (node.depth * 16) + "px", borderLeft: node.color ? `3px solid ${node.color}` : "3px solid transparent", color: fg } });
+    // 5px on top of the depth indent gives the row content air between the
+    // colored left border and the label text — without it, bold text and
+    // chevrons sit flush against the border.
+    const row = h("div", { style: { display: "flex", alignItems: "center", gap: "4px", padding: "4px 0", cursor: "pointer", fontSize: "13px", borderBottom: `1px solid ${subtleBorder}`, paddingLeft: (5 + node.depth * 16) + "px", borderLeft: node.color ? `3px solid ${node.color}` : "3px solid transparent", color: fg } });
     if (node.type === "drag-area") {
       row.appendChild(h("button", { text: collapsed.has(node.id) ? "\u25b8" : "\u25be", style: { border: "none", background: "none", cursor: "pointer", fontSize: "10px", color: muted, padding: "0", width: "16px" }, onClick: () => { if (collapsed.has(node.id)) collapsed.delete(node.id); else collapsed.add(node.id); rebuild(); } }));
     }
@@ -337,7 +343,12 @@ export function createShelfPanel(
       pocketIcon.style.marginRight = "2px";
       row.appendChild(pocketIcon);
     }
-    row.appendChild(h("span", { text: node.label, style: { flex: "1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, onClick: () => state.focusShape(node.shapeId) }));
+    const labelEl = h("span", {
+      style: { flex: "1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" },
+      onClick: () => state.focusShape(node.shapeId),
+    });
+    labelEl.appendChild(renderShelfLabel(node.label));
+    row.appendChild(labelEl);
     const pinBtn = h("button", { title: isPinned ? "Unpin" : "Pin", style: { border: "none", background: "none", cursor: "pointer", padding: "0", opacity: isPinned ? "0.8" : "0.4", color: isPinned ? theme.accent : muted, display: "flex", alignItems: "center", width: "16px", height: "16px" }, onClick: () => { if (isPinned) pinned.delete(node.id); else pinned.add(node.id); rebuild(); } });
     pinBtn.appendChild(icon("pin", 12));
     row.appendChild(pinBtn);

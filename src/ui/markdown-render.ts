@@ -20,6 +20,35 @@ export function renderMarkdownToFragment(source: string): DocumentFragment {
   return frag;
 }
 
+/**
+ * Inline-only renderer (no <p>/<ul>/<h1>): bold, italic, code, links,
+ * highlights. For contexts that already have their own block layout —
+ * chat bubble's text-segment slots, shelf rows, etc.
+ */
+export function renderInlineMarkdownToFragment(source: string): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  appendInline(frag, source);
+  return frag;
+}
+
+/**
+ * Shelf-label flavor: heading prefixes (`# foo`) become bold rather than
+ * scaling up — the shelf is single-line and a 1.8× heading would clip. The
+ * `#` markers themselves are stripped.
+ */
+export function renderShelfLabel(source: string): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  const heading = source.match(/^(#{1,6})\s+(.*)$/);
+  if (heading) {
+    const strong = document.createElement("strong");
+    appendInline(strong, heading[2]);
+    frag.appendChild(strong);
+    return frag;
+  }
+  appendInline(frag, source);
+  return frag;
+}
+
 interface Block {
   kind: "paragraph" | "heading" | "ul" | "ol" | "code";
   lines: string[];
@@ -70,10 +99,13 @@ function splitBlocks(source: string): Block[] {
       continue;
     }
 
-    // Unordered list: consecutive `-` / `*` / `+` items.
+    // Unordered list: consecutive `-` / `*` / `+` items, optionally
+    // separated by blank lines (loose lists).
     if (/^\s*[-*+]\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+      while (i < lines.length) {
+        if (lines[i].trim() === "") { i++; continue; }
+        if (!/^\s*[-*+]\s+/.test(lines[i])) break;
         items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
         i++;
       }
@@ -81,10 +113,12 @@ function splitBlocks(source: string): Block[] {
       continue;
     }
 
-    // Ordered list: consecutive `\d+.` items.
+    // Ordered list: consecutive `\d+.` items, blank-line-separated allowed.
     if (/^\s*\d+\.\s+/.test(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+      while (i < lines.length) {
+        if (lines[i].trim() === "") { i++; continue; }
+        if (!/^\s*\d+\.\s+/.test(lines[i])) break;
         items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
         i++;
       }
@@ -114,9 +148,11 @@ function renderBlock(block: Block): HTMLElement | null {
     case "paragraph": {
       const p = document.createElement("p");
       p.style.margin = "0 0 8px 0";
-      // Single newlines inside a paragraph become <br> — Claude often wraps
-      // longer paragraphs across lines and we want them visually one block.
-      const joined = block.lines.join("\n");
+      // CommonMark: single newlines within a paragraph collapse to spaces.
+      // (Two trailing spaces or `\` would be a hard break, but Claude
+      // doesn't emit those — and respecting them would render mid-sentence
+      // wraps from API-side word wrapping as broken lines.)
+      const joined = block.lines.join(" ");
       appendInline(p, joined);
       return p;
     }
@@ -169,7 +205,7 @@ function renderBlock(block: Block): HTMLElement | null {
 const INLINE_PATTERN =
   /(\*\*[^*]+?\*\*|\*[^*\n]+?\*|_[^_\n]+?_|`[^`\n]+?`|\[[^\]\n]+?\]\([^)\n]+?\)|==[^=\n]+?==)/g;
 
-function appendInline(parent: HTMLElement, text: string): void {
+function appendInline(parent: Node, text: string): void {
   let last = 0;
   for (const match of text.matchAll(INLINE_PATTERN)) {
     const idx = match.index ?? 0;
@@ -180,7 +216,7 @@ function appendInline(parent: HTMLElement, text: string): void {
   if (last < text.length) appendTextWithBreaks(parent, text.slice(last));
 }
 
-function appendTextWithBreaks(parent: HTMLElement, text: string): void {
+function appendTextWithBreaks(parent: Node, text: string): void {
   // Preserve hard line breaks within a paragraph as <br>.
   const parts = text.split("\n");
   for (let i = 0; i < parts.length; i++) {
