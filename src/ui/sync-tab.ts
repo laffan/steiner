@@ -4,7 +4,7 @@
 // and trades the auth code for tokens via the backend command.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "../event-bus";
 import { api, DROPBOX_APP_KEY, DROPBOX_REDIRECT_URI } from "../api";
 import { h } from "./dom-helpers";
 

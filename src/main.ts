@@ -1,5 +1,5 @@
 import "./index.css";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./event-bus";
 import {
   api,
   DEFAULT_ASK_WORD_LIMIT,

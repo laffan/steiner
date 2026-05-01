@@ -149,6 +149,84 @@ canvas state under the `flowchart` key.
   changes to `claude-content-script.js` require a Rust rebuild.
 - `scripts/fetch-assets.mjs` fetches binary assets that aren't in git. It
   skips files already on disk; safe to re-run.
+- Vite's `base` is `'./'` so emitted asset URLs are relative. The same
+  `dist/` works under `tauri://localhost/`, on GitHub Pages at
+  `/<repo>/`, and on `vite preview`. An absolute base would break the
+  Pages deploy; a hardcoded subpath would break Tauri.
+
+## Dual build: Tauri + web
+
+Steiner ships from one source tree to two targets — the desktop Tauri app
+and a static web app on GitHub Pages. There's **no compile-time flag**;
+the split is runtime, behind a single boolean.
+
+### Where the seam lives
+
+| File                  | Role                                                                                         |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `src/runtime.ts`      | Exports `IS_TAURI` (true iff `window.__TAURI_INTERNALS__` exists). Single source of truth.   |
+| `src/api.ts`          | Defines `ApiBackend` interface + Tauri impl; picks `tauriBackend` or `webBackend` at import. |
+| `src/web-api.ts`      | Web impl of `ApiBackend` — localStorage persistence + direct Anthropic API for Ask Claude.   |
+| `src/event-bus.ts`    | `listen` / `emit` shim. Pass-through to `@tauri-apps/api/event` on desktop; in-page on web.  |
+
+UI code never branches on `IS_TAURI` directly — it talks to `api` and
+`listen`, both of which dispatch internally. Two exceptions are gated
+explicitly: the Sync tab (Dropbox OAuth needs `steiner://`) and the export
+modal's filesystem-write path. Both check `IS_TAURI` from `runtime.ts`.
+
+### Web persistence
+
+```
+localStorage["steiner.web.settings"]        Settings JSON (single object)
+localStorage["steiner.web.sessions.index"]  SessionMeta[] (small)
+localStorage["steiner.web.session.<id>"]    Session JSON (per-session key)
+```
+
+Sessions are keyed individually so the index stays tiny and a single
+canvas's growth doesn't bloat reads. localStorage caps around 5 MB per
+origin; if a future session bumps that ceiling, swap `web-api.ts`'s four
+load/save helpers for IndexedDB without touching the `ApiBackend` shape.
+
+### Web Ask Claude
+
+`web-api.ts` calls `https://api.anthropic.com/v1/messages` directly with
+the user-supplied key (Settings → General). The
+`anthropic-dangerous-direct-browser-access: true` header is required
+since 2024-08 for browser-origin requests. The user's key is stored in
+`localStorage["steiner.web.settings"]` — that's a deliberate trust
+trade-off, documented in the user-facing README.
+
+The Tauri version streams via SSE and emits `ask-done`/`ask-error` from
+Rust as messages arrive; the web version awaits the full response, then
+emits the same events through the in-page `event-bus`. `main.ts`'s
+listener wiring is identical for both.
+
+### What the web build omits
+
+- **Claude pane** (`X-Frame-Options` blocks iframing claude.ai).
+- **Pin shortcut ⌘⇧P** (no webview to capture from).
+- **Chat / Wikipedia sidebar tabs** (native child webviews on desktop;
+  the sidebar hides them when `api.isDesktop()` returns false, which the
+  web stub does).
+- **Dropbox sync tab** (settings-modal.ts skips mounting it on web).
+- **Filesystem export** (export-modal.ts already had a browser fallback;
+  it just routes there now whenever `!IS_TAURI`).
+
+### Adding a new feature without breaking either build
+
+1. Add a method to the `ApiBackend` interface in `src/api.ts`.
+2. Implement it in `tauriBackend` (an `invoke` call into Rust).
+3. Implement it in `src/web-api.ts`'s `webBackend` — either as a real
+   browser-side implementation or with a clear `throw new Error(…)` if
+   it's desktop-only (and gate the calling UI on `IS_TAURI`).
+4. The compiler enforces both backends stay in sync.
+
+### Deploy
+
+`.github/workflows/pages.yml` runs `npm run setup:assets && npm run
+build:web` and publishes `dist/` to GitHub Pages. The workflow wants
+**Settings → Pages → Source: GitHub Actions** in the repo before the
+first deploy will succeed.
 
 ## iOS
 

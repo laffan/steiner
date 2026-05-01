@@ -7,6 +7,7 @@
 
 import type { NotesCanvas } from "../notes-canvas";
 import { exportCanvas, extensionForFormat, mimeForFormat, type ExportFormat, type ExportOptions, type ExportScale, type ExportScope } from "../notebook-export";
+import { IS_TAURI } from "../runtime";
 import { h } from "./dom-helpers";
 
 const DEFAULT_MARGIN = 40;
@@ -16,8 +17,6 @@ interface OpenArgs {
   title: string;
   canvas: NotesCanvas;
 }
-
-const IS_TAURI = typeof window !== "undefined" && (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ != null;
 
 function isIOS(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -257,7 +256,10 @@ function filterForFormat(fmt: ExportFormat): { name: string; extensions: string[
 async function deliver(bytes: Uint8Array, fileName: string, format: ExportFormat): Promise<void> {
   if (IS_TAURI) {
     if (isIOS()) {
-      const file = new File([bytes], fileName, { type: mimeForFormat(format) });
+      // TS 5.7+ types Uint8Array as generic over its backing buffer, so it
+      // doesn't satisfy BlobPart (which requires an ArrayBuffer-backed view).
+      // The runtime accepts it fine — cast through BlobPart to reflect that.
+      const file = new File([bytes as BlobPart], fileName, { type: mimeForFormat(format) });
       const nav = navigator as Navigator & { canShare?: (data: { files: File[] }) => boolean; share?: (data: { files: File[] }) => Promise<void> };
       if (!(nav.canShare && nav.canShare({ files: [file] }) && nav.share)) {
         throw new Error("Web Share API unavailable for this file");
@@ -279,8 +281,8 @@ async function deliver(bytes: Uint8Array, fileName: string, format: ExportFormat
     return;
   }
 
-  // Browser fallback (vite dev server, etc.)
-  const blob = new Blob([bytes], { type: mimeForFormat(format) });
+  // Browser fallback (vite dev server, GitHub Pages web build, etc.)
+  const blob = new Blob([bytes as BlobPart], { type: mimeForFormat(format) });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
