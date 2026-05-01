@@ -239,11 +239,23 @@ async function boot() {
         if (e.payload.request_id !== requestId) return;
         cleanup();
         const segments = e.payload.segments || undefined;
-        messages.push({
-          role: "assistant",
-          content: e.payload.text,
-          segments,
-        });
+        const text = (e.payload.text || "").trim();
+        if (!text) {
+          // Last-resort safety net: both backends now route empty responses
+          // through ask-error, but if a future code path slips through we
+          // still want a visible error rather than an empty bubble.
+          messages.push({
+            role: "assistant",
+            content: "Claude returned an empty response. Try asking again.",
+            error: true,
+          });
+        } else {
+          messages.push({
+            role: "assistant",
+            content: e.payload.text,
+            segments,
+          });
+        }
         commitChat(sourceShapeIds, chatId, messages.slice());
       });
       unlisteners.push(u1);
@@ -255,7 +267,8 @@ async function boot() {
           cleanup();
           messages.push({
             role: "assistant",
-            content: `[Error: ${e.payload.message}]`,
+            content: e.payload.message || "Ask Claude failed.",
+            error: true,
           });
           commitChat(sourceShapeIds, chatId, messages.slice());
         },
@@ -266,7 +279,7 @@ async function boot() {
     } catch (err) {
       cleanup();
       const msg = typeof err === "string" ? err : err instanceof Error ? err.message : "Failed";
-      messages.push({ role: "assistant", content: `[Error: ${msg}]` });
+      messages.push({ role: "assistant", content: msg, error: true });
       commitChat(sourceShapeIds, chatId, messages.slice());
     }
   }

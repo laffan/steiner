@@ -549,6 +549,7 @@ export function createChatHistoryPanel(opts: ChatPanelOptions) {
               content: m.content,
               segments: m.segments,
               sourceShapeIds: [r.shapeId],
+              error: m.error,
             }),
           );
         }

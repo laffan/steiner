@@ -133,6 +133,15 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
+ * With `tool_choice` forced to a specific tool, Claude is allowed to skip the
+ * preceding `text` content block entirely and emit just the tool call. That
+ * left users staring at empty chat bubbles. The system prompt makes the
+ * answer-then-tool-call ordering explicit so a text block is reliably produced.
+ */
+const ASK_SYSTEM_PROMPT =
+  "Answer the user's question in clear prose first. After your written answer, call the highlight_terms tool exactly once to mark the key concepts, names, and book/work titles in your answer. Never reply with only a tool call — the prose answer is required.";
+
+/**
  * Tool that Claude calls alongside its answer to mark up key terms. We force
  * the call via tool_choice so the response always contains structured term
  * data; the answer text comes through as preceding text content blocks.
@@ -207,6 +216,27 @@ function buildTermSegments(input: {
   return out;
 }
 
+/**
+ * Anthropic returns errors as `{ type: "error", error: { type, message } }`.
+ * Pull out the human-readable `message` when present so users see "invalid
+ * x-api-key" instead of a wall of JSON. Falls back to the raw body otherwise.
+ */
+function formatApiError(status: number, body: string): string {
+  if (body) {
+    try {
+      const parsed = JSON.parse(body) as {
+        error?: { message?: string; type?: string };
+      };
+      if (parsed.error?.message) {
+        return `Anthropic API ${status}: ${parsed.error.message}`;
+      }
+    } catch {
+      // Not JSON — fall through to raw text.
+    }
+  }
+  return `Anthropic API ${status}${body ? `: ${body}` : ""}`;
+}
+
 async function askClaudeViaAnthropic(
   requestId: string,
   messages: ChatMessage[],
@@ -236,9 +266,11 @@ async function askClaudeViaAnthropic(
       body: JSON.stringify({
         model: model || DEFAULT_MODEL,
         max_tokens: 4096,
+        system: ASK_SYSTEM_PROMPT,
         tools: [HIGHLIGHT_TOOL],
         // Force the tool call so the response always carries term metadata.
-        // The answer text still comes through in preceding `text` blocks.
+        // The system prompt above makes the model produce a `text` block
+        // first; if it doesn't, we surface that as an error below.
         tool_choice: { type: "tool", name: "highlight_terms" },
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
       }),
@@ -246,20 +278,45 @@ async function askClaudeViaAnthropic(
 
     if (!r.ok) {
       const body = await r.text().catch(() => "");
-      throw new Error(`Anthropic API ${r.status}${body ? `: ${body}` : ""}`);
+      throw new Error(formatApiError(r.status, body));
     }
-    const data = (await r.json()) as { content?: AnthropicContentBlock[] };
+    const data = (await r.json()) as {
+      content?: AnthropicContentBlock[];
+      type?: string;
+      error?: { message?: string; type?: string };
+      stop_reason?: string;
+    };
+    // Anthropic occasionally returns an error envelope at HTTP 200 (rate
+    // limit retries, certain overload conditions). Catch those before they
+    // fall through as an empty text response.
+    if (data.type === "error" || data.error) {
+      const msg = data.error?.message || "Anthropic API returned an error envelope.";
+      throw new Error(msg);
+    }
     const blocks = data.content || [];
     const text = blocks
       .filter((b) => b.type === "text")
       .map((b) => b.text || "")
-      .join("");
+      .join("")
+      .trim();
     const toolBlock = blocks.find(
       (b) => b.type === "tool_use" && b.name === "highlight_terms",
     );
     const segments = toolBlock?.input
       ? buildTermSegments(toolBlock.input)
       : null;
+    if (!text) {
+      // Empty text block means the model skipped the prose answer (e.g. went
+      // straight to the tool call) or hit max_tokens before producing any
+      // visible content. Either way the chat bubble would be blank — surface
+      // it as an error so the user understands why.
+      const reason = data.stop_reason
+        ? ` (stop_reason: ${data.stop_reason})`
+        : "";
+      throw new Error(
+        `Claude returned no text in its response${reason}. Try asking again.`,
+      );
+    }
     emit("ask-done", { request_id: requestId, text, segments });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
