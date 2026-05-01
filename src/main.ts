@@ -348,11 +348,25 @@ async function boot() {
 
 function snapFromBackend(canvas: Session["canvas"] | undefined | null): CanvasSnapshot | null {
   if (!canvas) return null;
-  const c = canvas as { shapes?: unknown; flow_edges?: unknown };
+  const c = canvas as { shapes?: unknown; flow_edges?: unknown; camera?: unknown };
   return {
     shapes: (c.shapes as CanvasSnapshot["shapes"]) || [],
     flow_edges: (c.flow_edges as CanvasSnapshot["flow_edges"]) || [],
+    camera: readCamera(c.camera),
   };
+}
+
+function readCamera(raw: unknown): CanvasSnapshot["camera"] {
+  // Legacy sessions don't carry a camera; corruption from a hand-edited
+  // localStorage payload could surface as NaN/strings/missing keys. Validate
+  // the shape so the canvas-host fallback (origin) kicks in cleanly instead
+  // of poisoning state.camera with junk.
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as { x?: unknown; y?: unknown; zoom?: unknown };
+  if (typeof c.x !== "number" || !Number.isFinite(c.x)) return undefined;
+  if (typeof c.y !== "number" || !Number.isFinite(c.y)) return undefined;
+  if (typeof c.zoom !== "number" || !Number.isFinite(c.zoom) || c.zoom <= 0) return undefined;
+  return { x: c.x, y: c.y, zoom: c.zoom };
 }
 
 function readShapeChats(canvas: Session["canvas"] | undefined | null): ShapeChats {
@@ -384,6 +398,7 @@ function snapToBackend(snap: CanvasSnapshot, chats: ShapeChats, transcripts: Tra
     flow_edges: snap.flow_edges as unknown,
     shape_chats: chats,
     transcripts,
+    camera: snap.camera,
   };
 }
 
