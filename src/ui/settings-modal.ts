@@ -6,6 +6,7 @@ import {
   DEFAULT_PROMPT_SUFFIX,
   MODELS,
 } from "../api";
+import { IS_TAURI } from "../runtime";
 import { h } from "./dom-helpers";
 import { createSyncTab } from "./sync-tab";
 
@@ -202,9 +203,10 @@ export function createSettingsModal() {
     ],
   });
 
-  // --- Sync tab ---
+  // --- Sync tab (desktop only — Dropbox OAuth uses a custom URL scheme that
+  // can't be registered from a browser tab). ---
 
-  const syncTab = createSyncTab();
+  const syncTab = IS_TAURI ? createSyncTab() : null;
 
   // --- Tab strip + container ---
 
@@ -243,10 +245,10 @@ export function createSettingsModal() {
 
   const generalTabBtn = makeTab("general", "General");
   const promptTabBtn = makeTab("prompt", "Prompt");
-  const syncTabBtn = makeTab("sync", "Sync");
+  const syncTabBtn = syncTab ? makeTab("sync", "Sync") : null;
   tabStrip.appendChild(generalTabBtn);
   tabStrip.appendChild(promptTabBtn);
-  tabStrip.appendChild(syncTabBtn);
+  if (syncTabBtn) tabStrip.appendChild(syncTabBtn);
 
   const contentPane = h("div", {
     style: { display: "flex", flexDirection: "column" },
@@ -259,12 +261,14 @@ export function createSettingsModal() {
     });
     Object.assign(generalTabBtn.style, activeStyle(activeTab === "general"));
     Object.assign(promptTabBtn.style, activeStyle(activeTab === "prompt"));
-    Object.assign(syncTabBtn.style, activeStyle(activeTab === "sync"));
+    if (syncTabBtn) {
+      Object.assign(syncTabBtn.style, activeStyle(activeTab === "sync"));
+    }
     contentPane.innerHTML = "";
     if (activeTab === "general") contentPane.appendChild(generalPane);
     else if (activeTab === "prompt") contentPane.appendChild(promptPane);
-    else contentPane.appendChild(syncTab.el);
-    if (activeTab === "sync") void syncTab.refresh();
+    else if (syncTab) contentPane.appendChild(syncTab.el);
+    if (activeTab === "sync" && syncTab) void syncTab.refresh();
     if (activeTab === "prompt") updatePromptPreview();
   }
 

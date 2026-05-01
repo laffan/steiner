@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { IS_TAURI } from "./runtime";
+import { webBackend } from "./web-api";
 
 /** A persisted message inside a top-level Session (currently not surfaced in UI). */
 export interface SessionMessage {
@@ -108,59 +110,94 @@ export const MODELS = [
 
 export const DEFAULT_MODEL = "claude-opus-4-7";
 
-export const api = {
-  getSettings: () => invoke<Settings>("get_settings"),
-  setApiKey: (key: string) => invoke<void>("set_api_key", { key }),
-  setAskWordLimit: (limit: number) =>
-    invoke<void>("set_ask_word_limit", { limit }),
-  setAskModel: (model: string) => invoke<void>("set_ask_model", { model }),
-  setAskPromptPrefix: (prefix: string) =>
-    invoke<void>("set_ask_prompt_prefix", { prefix }),
-  setAskPromptSuffix: (suffix: string) =>
-    invoke<void>("set_ask_prompt_suffix", { suffix }),
-  isDesktop: () => invoke<boolean>("is_desktop"),
-  showBrowserWebview: (
+/**
+ * Backend surface shared by the Tauri and web builds. Keep this as the only
+ * interface UI code talks to — anything that branches on IS_TAURI outside
+ * of this file is a smell.
+ */
+export interface ApiBackend {
+  getSettings(): Promise<Settings>;
+  setApiKey(key: string): Promise<void>;
+  setAskWordLimit(limit: number): Promise<void>;
+  setAskModel(model: string): Promise<void>;
+  setAskPromptPrefix(prefix: string): Promise<void>;
+  setAskPromptSuffix(suffix: string): Promise<void>;
+  isDesktop(): Promise<boolean>;
+  showBrowserWebview(
     kind: BrowserKind,
     x: number,
     y: number,
     w: number,
     h: number,
-  ) => invoke<void>("show_browser_webview", { kind, x, y, w, h }),
-  hideBrowserWebview: (kind: BrowserKind) =>
-    invoke<void>("hide_browser_webview", { kind }),
+  ): Promise<void>;
+  hideBrowserWebview(kind: BrowserKind): Promise<void>;
 
-  listSessions: () => invoke<SessionMeta[]>("list_sessions"),
-  createSession: (title?: string, model?: string) =>
-    invoke<Session>("create_session", { title, model }),
-  getSession: (id: string) => invoke<Session>("get_session", { id }),
-  updateSessionTitle: (id: string, title: string) =>
-    invoke<void>("update_session_title", { id, title }),
-  updateSessionModel: (id: string, model: string) =>
-    invoke<void>("update_session_model", { id, model }),
-  setSessionArchived: (id: string, archived: boolean) =>
-    invoke<void>("set_session_archived", { id, archived }),
-  saveSessionCanvas: (id: string, canvas: CanvasState) =>
-    invoke<void>("save_session_canvas", { id, canvas }),
-  deleteSession: (id: string) => invoke<void>("delete_session", { id }),
-  exportSessionMarkdown: (id: string) =>
-    invoke<string>("export_session_markdown", { id }),
-  writeTextFile: (path: string, contents: string) =>
-    invoke<void>("write_text_file", { path, contents }),
-  sendMessage: (sessionId: string, content: string) =>
-    invoke<string>("send_message", { sessionId, content }),
-  askClaudeStream: (
+  listSessions(): Promise<SessionMeta[]>;
+  createSession(title?: string, model?: string): Promise<Session>;
+  getSession(id: string): Promise<Session>;
+  updateSessionTitle(id: string, title: string): Promise<void>;
+  updateSessionModel(id: string, model: string): Promise<void>;
+  setSessionArchived(id: string, archived: boolean): Promise<void>;
+  saveSessionCanvas(id: string, canvas: CanvasState): Promise<void>;
+  deleteSession(id: string): Promise<void>;
+  exportSessionMarkdown(id: string): Promise<string>;
+  writeTextFile(path: string, contents: string): Promise<void>;
+  sendMessage(sessionId: string, content: string): Promise<string>;
+  askClaudeStream(
     requestId: string,
     messages: { role: "user" | "assistant"; content: string }[],
     model?: string,
-  ) => invoke<void>("ask_claude_stream", { requestId, messages, model }),
+  ): Promise<void>;
 
-  dropboxStatus: () => invoke<DropboxStatus>("dropbox_status"),
-  dropboxExchangeCode: (
+  dropboxStatus(): Promise<DropboxStatus>;
+  dropboxExchangeCode(
     code: string,
     codeVerifier: string,
     appKey: string,
     redirectUri: string,
-  ) =>
+  ): Promise<DropboxStatus>;
+  dropboxDisconnect(): Promise<void>;
+  dropboxSyncNow(appKey: string): Promise<SyncResult>;
+}
+
+const tauriBackend: ApiBackend = {
+  getSettings: () => invoke<Settings>("get_settings"),
+  setApiKey: (key) => invoke<void>("set_api_key", { key }),
+  setAskWordLimit: (limit) => invoke<void>("set_ask_word_limit", { limit }),
+  setAskModel: (model) => invoke<void>("set_ask_model", { model }),
+  setAskPromptPrefix: (prefix) =>
+    invoke<void>("set_ask_prompt_prefix", { prefix }),
+  setAskPromptSuffix: (suffix) =>
+    invoke<void>("set_ask_prompt_suffix", { suffix }),
+  isDesktop: () => invoke<boolean>("is_desktop"),
+  showBrowserWebview: (kind, x, y, w, h) =>
+    invoke<void>("show_browser_webview", { kind, x, y, w, h }),
+  hideBrowserWebview: (kind) => invoke<void>("hide_browser_webview", { kind }),
+
+  listSessions: () => invoke<SessionMeta[]>("list_sessions"),
+  createSession: (title, model) =>
+    invoke<Session>("create_session", { title, model }),
+  getSession: (id) => invoke<Session>("get_session", { id }),
+  updateSessionTitle: (id, title) =>
+    invoke<void>("update_session_title", { id, title }),
+  updateSessionModel: (id, model) =>
+    invoke<void>("update_session_model", { id, model }),
+  setSessionArchived: (id, archived) =>
+    invoke<void>("set_session_archived", { id, archived }),
+  saveSessionCanvas: (id, canvas) =>
+    invoke<void>("save_session_canvas", { id, canvas }),
+  deleteSession: (id) => invoke<void>("delete_session", { id }),
+  exportSessionMarkdown: (id) =>
+    invoke<string>("export_session_markdown", { id }),
+  writeTextFile: (path, contents) =>
+    invoke<void>("write_text_file", { path, contents }),
+  sendMessage: (sessionId, content) =>
+    invoke<string>("send_message", { sessionId, content }),
+  askClaudeStream: (requestId, messages, model) =>
+    invoke<void>("ask_claude_stream", { requestId, messages, model }),
+
+  dropboxStatus: () => invoke<DropboxStatus>("dropbox_status"),
+  dropboxExchangeCode: (code, codeVerifier, appKey, redirectUri) =>
     invoke<DropboxStatus>("dropbox_exchange_code", {
       code,
       codeVerifier,
@@ -168,12 +205,14 @@ export const api = {
       redirectUri,
     }),
   dropboxDisconnect: () => invoke<void>("dropbox_disconnect"),
-  dropboxSyncNow: (appKey: string) =>
-    invoke<SyncResult>("dropbox_sync_now", { appKey }),
+  dropboxSyncNow: (appKey) => invoke<SyncResult>("dropbox_sync_now", { appKey }),
 };
+
+export const api: ApiBackend = IS_TAURI ? tauriBackend : webBackend;
 
 export const DROPBOX_REDIRECT_URI = "steiner://auth/callback";
 
 /** Vite-injected build-time secrets. The user creates a Dropbox app and puts
- *  `VITE_DROPBOX_APP_KEY=…` in a local `.env` file. */
+ *  `VITE_DROPBOX_APP_KEY=…` in a local `.env` file. Web builds ignore this
+ *  since the Sync tab is desktop-only. */
 export const DROPBOX_APP_KEY: string = (import.meta.env?.VITE_DROPBOX_APP_KEY as string | undefined) || "";

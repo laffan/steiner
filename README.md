@@ -87,6 +87,40 @@ For pure web canvas development without the Claude pane:
 npm run dev            # http://localhost:5173 — canvas only, no IPC
 ```
 
+## Web build (GitHub Pages)
+
+The same source tree builds to a static web app that runs in any browser
+(no Tauri, no native code). Sessions and settings are stored in
+`localStorage` instead of files; **Ask Claude** calls the Anthropic API
+directly using a key the user pastes into Settings → General.
+
+```bash
+npm run build:web      # produces dist/ that can be hosted anywhere static
+npm run preview        # smoke-test the bundle on http://localhost:4173
+```
+
+The repo includes a GitHub Actions workflow at
+[`.github/workflows/pages.yml`](./.github/workflows/pages.yml) that builds
+and publishes `dist/` to GitHub Pages on every push to `main`. To enable:
+
+1. Repo **Settings → Pages → Source**: GitHub Actions.
+2. Push to `main`. The site deploys to
+   `https://<user>.github.io/<repo>/`.
+
+What the web build does **not** include (vs. Tauri):
+
+- No Claude pane (claude.ai blocks iframing via X-Frame-Options).
+- No global ⌘⇧P pin shortcut (no embedded webview to capture from).
+- No Wikipedia sidebar tab (uses a native child webview on desktop).
+- No Dropbox sync (the OAuth flow uses a `steiner://` redirect URI that
+  only registers from the desktop app).
+- No filesystem export — exports route through a browser download instead.
+
+Everything else — canvas, sessions, Ask Claude, flowchart layer, exports,
+clipboard format — works identically in both targets. UI improvements made
+in `src/` ship to both builds without modification; Tauri-only features
+guard themselves behind `IS_TAURI` from `src/runtime.ts`.
+
 ### Asset fetching
 
 The repo intentionally does **not** check in binary assets — the woff2 fonts

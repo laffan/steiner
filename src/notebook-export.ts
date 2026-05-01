@@ -22,7 +22,7 @@ import { renderForExport } from "./renderer";
 import { getShapeBounds } from "./utils";
 import { parseText } from "./markdown";
 import { COLOR_PALETTE, LINE_HEIGHT_RATIO } from "./types";
-import type { Bounds, Camera, DragAreaShape, DrawShape, ImageShape, Shape, TextShape } from "./types";
+import type { Bounds, Camera, DragAreaShape, DrawShape, ImageShape, TextShape } from "./types";
 
 export type ExportScope = "visible" | "all";
 export type ExportFormat = "steiner" | "png" | "jpg" | "pdf";
