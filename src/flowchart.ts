@@ -54,10 +54,22 @@ export interface FlowBounds {
   maxY: number;
 }
 
+/**
+ * "horizontal" — always exit the parent's right (or left) edge and enter the
+ *   child's opposite horizontal edge. This is the legacy behaviour: an arrow
+ *   connecting two vertically-stacked boxes still snakes out of the right
+ *   side, around, and back to the left.
+ * "closest" — pick whichever pair of opposing cardinal edges (top/bottom or
+ *   left/right) is closest. Boxes stacked vertically connect bottom→top with
+ *   a straight-down line; horizontally-adjacent boxes still connect
+ *   right→left like before.
+ */
+export type FlowConnectMode = "horizontal" | "closest";
+
 export interface FlowchartConfig<S extends FlowNode> {
   /** Returns the canvas-space bounds of the node. */
   getBounds: (node: S) => FlowBounds;
-  /** Predicate for which nodes can be flowchart vertices. Defaults to all. */
+  /** Predicate for which nodes can be flowable flowchart vertices. Defaults to all. */
   isFlowable?: (node: S) => boolean;
   /** Horizontal gap between parent's right edge and child's left edge. */
   gapX?: number;
@@ -73,6 +85,9 @@ export interface FlowchartConfig<S extends FlowNode> {
   arrowWidth?: number;
   /** Arrowhead size (canvas units). */
   arrowHeadSize?: number;
+  /** How to choose which edges of the parent + child the arrow connects.
+   *  Defaults to "closest". */
+  connectMode?: FlowConnectMode;
 }
 
 interface ResolvedConfig<S extends FlowNode> {
@@ -85,6 +100,7 @@ interface ResolvedConfig<S extends FlowNode> {
   arrowColor: string;
   arrowWidth: number;
   arrowHeadSize: number;
+  connectMode: FlowConnectMode;
 }
 
 export class FlowchartLayer<S extends FlowNode> {
@@ -102,7 +118,13 @@ export class FlowchartLayer<S extends FlowNode> {
       arrowColor: config.arrowColor ?? "#666",
       arrowWidth: config.arrowWidth ?? 1.5,
       arrowHeadSize: config.arrowHeadSize ?? 11,
+      connectMode: config.connectMode ?? "closest",
     };
+  }
+
+  /** Switch between horizontal-only and closest-edge arrow routing. */
+  setConnectMode(mode: FlowConnectMode): void {
+    this.cfg.connectMode = mode;
   }
 
   // --- State ---
@@ -425,6 +447,12 @@ export class FlowchartLayer<S extends FlowNode> {
   // --- Rendering ---
 
   private geometry(ab: FlowBounds, bb: FlowBounds): EdgeGeometry {
+    return this.cfg.connectMode === "closest"
+      ? this.geometryClosest(ab, bb)
+      : this.geometryHorizontal(ab, bb);
+  }
+
+  private geometryHorizontal(ab: FlowBounds, bb: FlowBounds): EdgeGeometry {
     // Pick the side of each box closer to the other so the arrow looks sane
     // even if the user drags the child to the parent's left/below.
     const childOnRight = (bb.minX + bb.maxX) / 2 >= (ab.minX + ab.maxX) / 2;
@@ -451,6 +479,81 @@ export class FlowchartLayer<S extends FlowNode> {
       p3: { x: ex, y: ey },
       tip: { x: tipX, y: tipY },
       sign,
+      perpX: 0,
+      perpY: sign,
+    };
+  }
+
+  private geometryClosest(ab: FlowBounds, bb: FlowBounds): EdgeGeometry {
+    const acx = (ab.minX + ab.maxX) / 2;
+    const acy = (ab.minY + ab.maxY) / 2;
+    const bcx = (bb.minX + bb.maxX) / 2;
+    const bcy = (bb.minY + bb.maxY) / 2;
+
+    // Signed gap between facing edges along each axis. Positive = clear
+    // separation, negative = overlap on that axis. The axis with the larger
+    // gap is the one with clearer separation, so route the arrow that way.
+    const horizGap = bcx >= acx ? bb.minX - ab.maxX : ab.minX - bb.maxX;
+    const vertGap = bcy >= acy ? bb.minY - ab.maxY : ab.minY - bb.maxY;
+
+    let dirX = 0, dirY = 0;
+    let sx: number, sy: number, cx: number, cy: number;
+    if (horizGap >= vertGap) {
+      // Connect right↔left (or left↔right) — anchor at the vertical midpoint
+      // of each edge so the line is fixed to the centre of the side rather
+      // than sliding along it as the other box moves.
+      if (bcx >= acx) {
+        sx = ab.maxX; cx = bb.minX; dirX = 1;
+      } else {
+        sx = ab.minX; cx = bb.maxX; dirX = -1;
+      }
+      sy = acy;
+      cy = bcy;
+    } else {
+      // Connect bottom↔top (or top↔bottom) — anchor at the horizontal
+      // midpoint of each edge.
+      if (bcy >= acy) {
+        sy = ab.maxY; cy = bb.minY; dirY = 1;
+      } else {
+        sy = ab.minY; cy = bb.maxY; dirY = -1;
+      }
+      sx = acx;
+      cx = bcx;
+    }
+
+    const TIP_GAP = 10;
+    const tipX = cx - dirX * TIP_GAP;
+    const tipY = cy - dirY * TIP_GAP;
+
+    const ah = this.cfg.arrowHeadSize;
+    const ex = tipX - dirX * ah;
+    const ey = tipY - dirY * ah;
+
+    // Pull bezier control points along the arrow direction from each end so
+    // the curve leaves and arrives perpendicular to the edges it touches.
+    const span = Math.max(40, (Math.abs(ex - sx) + Math.abs(ey - sy)) * 0.5);
+    const cp1x = sx + dirX * span;
+    const cp1y = sy + dirY * span;
+    const cp2x = ex - dirX * span;
+    const cp2y = ey - dirY * span;
+
+    // Perpendicular unit vector — used to splay the arrowhead base.
+    const perpX = -dirY;
+    const perpY = dirX;
+    // `sign` is retained for legacy renderers that assume horizontal arrows
+    // (e.g. PDF export that still keys on it). It picks something sensible
+    // for vertical arrows but new code should use perpX/perpY.
+    const sign = dirX !== 0 ? dirX : dirY;
+
+    return {
+      p0: { x: sx, y: sy },
+      cp1: { x: cp1x, y: cp1y },
+      cp2: { x: cp2x, y: cp2y },
+      p3: { x: ex, y: ey },
+      tip: { x: tipX, y: tipY },
+      sign,
+      perpX,
+      perpY,
     };
   }
 
@@ -484,13 +587,12 @@ export class FlowchartLayer<S extends FlowNode> {
       ctx.bezierCurveTo(g.cp1.x, g.cp1.y, g.cp2.x, g.cp2.y, g.p3.x, g.p3.y);
       ctx.stroke();
 
-      // Arrowhead — base at p3, tip at .tip.
-      const px = 0;
-      const py = g.sign;
+      // Arrowhead — base at p3, tip at .tip. perpX/perpY is the unit vector
+      // perpendicular to the arrow direction so the base splays both ways.
       ctx.beginPath();
       ctx.moveTo(g.tip.x, g.tip.y);
-      ctx.lineTo(g.p3.x + ah * 0.55 * px, g.p3.y + ah * 0.55 * py);
-      ctx.lineTo(g.p3.x - ah * 0.55 * px, g.p3.y - ah * 0.55 * py);
+      ctx.lineTo(g.p3.x + ah * 0.55 * g.perpX, g.p3.y + ah * 0.55 * g.perpY);
+      ctx.lineTo(g.p3.x - ah * 0.55 * g.perpX, g.p3.y - ah * 0.55 * g.perpY);
       ctx.closePath();
       ctx.fill();
     }
@@ -507,6 +609,7 @@ export class FlowchartLayer<S extends FlowNode> {
    *  edge whose endpoints are both present in `shapes`. */
   describeEdges(shapes: S[]): {
     p0: Pt; cp1: Pt; cp2: Pt; p3: Pt; tip: Pt; sign: number;
+    perpX: number; perpY: number;
     color: string; width: number; arrowHeadSize: number;
   }[] {
     const byId = new Map<string, S>();
@@ -519,6 +622,7 @@ export class FlowchartLayer<S extends FlowNode> {
       const g = this.geometry(this.cfg.getBounds(a), this.cfg.getBounds(b));
       out.push({
         p0: g.p0, cp1: g.cp1, cp2: g.cp2, p3: g.p3, tip: g.tip, sign: g.sign,
+        perpX: g.perpX, perpY: g.perpY,
         color: this.cfg.arrowColor, width: this.cfg.arrowWidth, arrowHeadSize: this.cfg.arrowHeadSize,
       });
     }
@@ -543,9 +647,16 @@ interface EdgeGeometry {
   p3: Pt;
   /** Tip of the arrowhead — touches the child shape's edge. */
   tip: Pt;
-  /** +1 if child is to the right of parent, -1 if to the left. */
+  /** Legacy hint kept for renderers that assume horizontal arrows.
+   *  +1 if child is to the right/below parent, -1 if to the left/above. */
   sign: number;
+  /** Unit vector perpendicular to the arrow direction at the tip — used to
+   *  splay the arrowhead base. For a horizontal arrow this is (0, ±1); for
+   *  a vertical arrow (±1, 0). */
+  perpX: number;
+  perpY: number;
 }
+
 
 function bezier(g: EdgeGeometry, t: number): Pt {
   const u = 1 - t;

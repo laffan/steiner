@@ -7,12 +7,20 @@ import {
   MODELS,
 } from "../api";
 import { IS_TAURI } from "../runtime";
+import type { FlowConnectMode } from "../flowchart";
 import { h } from "./dom-helpers";
+import { loadFlowConnectMode, saveFlowConnectMode } from "./flow-prefs";
 import { createSyncTab } from "./sync-tab";
 
 type TabId = "general" | "prompt" | "sync";
 
-export function createSettingsModal() {
+export interface SettingsModalOptions {
+  /** Called when the user changes the flowchart edge-connection mode in
+   *  Settings. The host re-applies it to the live canvas immediately. */
+  onFlowConnectModeChanged?: (mode: FlowConnectMode) => void;
+}
+
+export function createSettingsModal(opts: SettingsModalOptions = {}) {
   let onClose: (() => void) | null = null;
   let activeTab: TabId = "general";
 
@@ -65,6 +73,34 @@ export function createSettingsModal() {
   }
   modelSelect.value = DEFAULT_MODEL;
 
+  const flowConnectSelect = h("select", {
+    style: {
+      padding: "8px 10px",
+      border: "1px solid #ddd",
+      borderRadius: "8px",
+      fontSize: "14px",
+      fontFamily: "inherit",
+      outline: "none",
+      background: "#fff",
+      cursor: "pointer",
+    },
+  }) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["closest", "Connect closest edge"],
+    ["horizontal", "Connect left/right edges"],
+  ] as const) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    flowConnectSelect.appendChild(opt);
+  }
+  flowConnectSelect.value = loadFlowConnectMode();
+  flowConnectSelect.addEventListener("change", () => {
+    const mode: FlowConnectMode = flowConnectSelect.value === "horizontal" ? "horizontal" : "closest";
+    saveFlowConnectMode(mode);
+    opts.onFlowConnectModeChanged?.(mode);
+  });
+
   const generalStatus = h("div", {
     style: { fontSize: "12px", color: "#666", minHeight: "16px" },
   });
@@ -114,6 +150,17 @@ export function createSettingsModal() {
       h("div", {
         style: { display: "flex", justifyContent: "flex-start" },
         children: [clearKeyBtn],
+      }),
+      h("label", {
+        style: { fontSize: "13px", color: "#444", marginTop: "4px" },
+        children: ["Flowchart edge connections"],
+      }),
+      flowConnectSelect,
+      h("div", {
+        style: { fontSize: "11px", color: "#888" },
+        children: [
+          'How flowchart arrows route between linked text shapes. "Closest" picks the nearest pair of edges; "Left/right" always exits a parent\'s right edge.',
+        ],
       }),
       generalStatus,
     ],
@@ -370,6 +417,7 @@ export function createSettingsModal() {
   async function open(cb?: () => void) {
     onClose = cb || null;
     activeTab = "general";
+    flowConnectSelect.value = loadFlowConnectMode();
     try {
       const s = await api.getSettings();
       apiInput.value = "";

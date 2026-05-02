@@ -258,6 +258,7 @@ function drawPdfFlowEdge(
   doc: jsPDF,
   e: { p0: { x: number; y: number }; cp1: { x: number; y: number }; cp2: { x: number; y: number };
        p3: { x: number; y: number }; tip: { x: number; y: number }; sign: number;
+       perpX: number; perpY: number;
        color: string; width: number; arrowHeadSize: number },
   c: Camera,
 ) {
@@ -280,13 +281,11 @@ function drawPdfFlowEdge(
 
   // Arrowhead — base at p3, tip at .tip. Same triangle the canvas paints.
   const ah = e.arrowHeadSize * c.zoom;
-  const px = 0;
-  const py = e.sign;
   const tipX = toPageX(e.tip.x, c), tipY = toPageY(e.tip.y, c);
-  const baseAx = p3x + ah * 0.55 * px;
-  const baseAy = p3y + ah * 0.55 * py;
-  const baseBx = p3x - ah * 0.55 * px;
-  const baseBy = p3y - ah * 0.55 * py;
+  const baseAx = p3x + ah * 0.55 * e.perpX;
+  const baseAy = p3y + ah * 0.55 * e.perpY;
+  const baseBx = p3x - ah * 0.55 * e.perpX;
+  const baseBy = p3y - ah * 0.55 * e.perpY;
   doc.lines(
     [[baseAx - tipX, baseAy - tipY, baseBx - tipX, baseBy - tipY, tipX - tipX, tipY - tipY]],
     tipX, tipY, [1, 1], "F", true,

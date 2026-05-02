@@ -645,6 +645,19 @@ export class DrawingState extends EventTarget {
         for (const id of this.selectedIds) {
           for (const d of this.flowchart.descendantsOf(id)) flowDescendants.add(d);
         }
+        // If a flowchart descendant is part of a group, the rest of that group
+        // tags along — otherwise dragging the parent would tear the group
+        // apart by leaving the non-descendant siblings behind.
+        const followingGroups = new Set<string>();
+        for (const id of flowDescendants) {
+          const sh = this.shapes.find((s) => s.id === id);
+          if (sh?.groupId) followingGroups.add(sh.groupId);
+        }
+        if (followingGroups.size > 0) {
+          for (const sh of this.shapes) {
+            if (sh.groupId && followingGroups.has(sh.groupId)) flowDescendants.add(sh.id);
+          }
+        }
         this.shapes = this.shapes.map((s) => {
           if (this.selectedIds.has(s.id)) return moveShape(s, dx, dy);
           if (s.parentId && selectedDragAreaIds.has(s.parentId)) return moveShape(s, dx, dy);
@@ -849,9 +862,21 @@ export class DrawingState extends EventTarget {
                   : s,
               );
               // Snapping the parent also pulls its descendants — replay their
-              // existing offset so the chain stays intact.
-              const desc = this.flowchart.descendantsOf(droppedId);
+              // existing offset so the chain stays intact. Grouped descendants
+              // bring the rest of their group along so the group doesn't get
+              // torn apart by the snap.
+              const desc = new Set(this.flowchart.descendantsOf(droppedId));
               if (desc.size > 0) {
+                const groups = new Set<string>();
+                for (const id of desc) {
+                  const sh = this.shapes.find((s) => s.id === id);
+                  if (sh?.groupId) groups.add(sh.groupId);
+                }
+                if (groups.size > 0) {
+                  for (const sh of this.shapes) {
+                    if (sh.groupId && groups.has(sh.groupId)) desc.add(sh.id);
+                  }
+                }
                 this.shapes = this.shapes.map((s) =>
                   desc.has(s.id) ? moveShape(s, dx, dy) : s,
                 );

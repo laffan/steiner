@@ -1,7 +1,8 @@
 import { NotesCanvas } from "../notes-canvas";
 import type { Camera, Shape } from "../types";
-import type { FlowEdge } from "../flowchart";
+import type { FlowEdge, FlowConnectMode } from "../flowchart";
 import { h } from "./dom-helpers";
+import { loadFlowConnectMode } from "./flow-prefs";
 
 export interface CanvasSnapshot {
   shapes: Shape[];
@@ -30,6 +31,7 @@ export function createCanvasHost(opts: Options) {
   });
 
   const canvas = new NotesCanvas(stage);
+  canvas.state.flowchart.setConnectMode(loadFlowConnectMode());
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let suppressSave = false;
@@ -94,5 +96,10 @@ export function createCanvasHost(opts: Options) {
   function undo() { canvas.state.undo(); }
   function redo() { canvas.state.redo(); }
 
-  return { el: stage, load, snapshot, flushPendingSave, findShape, focusShape, getCanvas: () => canvas, undo, redo };
+  function setFlowConnectMode(mode: FlowConnectMode) {
+    canvas.state.flowchart.setConnectMode(mode);
+    canvas.state.notify("shapes");
+  }
+
+  return { el: stage, load, snapshot, flushPendingSave, findShape, focusShape, getCanvas: () => canvas, undo, redo, setFlowConnectMode };
 }

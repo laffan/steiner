@@ -60,13 +60,15 @@ async function boot() {
     onLayoutChange: () => scheduleBrowserSync(),
   });
 
-  const settings = createSettingsModal();
-
   const canvasHost = createCanvasHost({
     onChange: async (snap) => {
       if (!activeSession) return;
       await api.saveSessionCanvas(activeSession.id, snapToBackend(snap, shapeChats, transcripts));
     },
+  });
+
+  const settings = createSettingsModal({
+    onFlowConnectModeChanged: (mode) => canvasHost.setFlowConnectMode(mode),
   });
 
   const chatPanel = createChatHistoryPanel({
