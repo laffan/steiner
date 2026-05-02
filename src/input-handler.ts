@@ -7,6 +7,28 @@ import { screenToCanvas, getShapeBounds } from "./utils";
 import { CLIPBOARD_SCHEMA, encodeSelection, tryDecode, remapForPaste } from "./clipboard-format";
 import { htmlStringToMarkdown } from "./html-to-markdown";
 import { HIGHLIGHT_STYLE } from "./ui/chat-bubble";
+import { IS_TAURI } from "./runtime";
+import {
+  writeText as tauriWriteText, readText as tauriReadText,
+} from "@tauri-apps/plugin-clipboard-manager";
+
+// Tauri's WKWebView blocks `navigator.clipboard.writeText` /
+// `readText` from non-editable canvas focus, so on desktop we route
+// through the clipboard-manager plugin (which talks to NSPasteboard
+// directly). The browser build keeps the standard navigator API.
+async function writeClipboardText(text: string): Promise<void> {
+  if (IS_TAURI) {
+    try { await tauriWriteText(text); return; } catch { /* fall through */ }
+  }
+  try { await navigator.clipboard.writeText(text); } catch { /* clipboard unavailable */ }
+}
+
+async function readClipboardText(): Promise<string> {
+  if (IS_TAURI) {
+    try { return await tauriReadText(); } catch { /* fall through */ }
+  }
+  try { return await navigator.clipboard.readText(); } catch { return ""; }
+}
 
 /** Same shape as the JSON inside `application/x-steiner-ask`. Reused by the
  *  touch-drag path (which can't read DataTransfer because synthetic drops
@@ -398,13 +420,11 @@ function copySelectionToClipboard(state: import("./state").DrawingState): boolea
   const selected = state.shapes.filter((s) => state.selectedIds.has(s.id));
   if (selected.length === 0) return false;
   const payload = encodeSelection(selected, state.flowchart.edges);
-  // Best-effort clipboard write. The async API requires a secure context
-  // (Tauri's webview, https://, or localhost). Failures are swallowed rather
-  // than trapping the keyboard shortcut — there's no good fallback we can
-  // run synchronously inside a keydown handler.
-  void navigator.clipboard.writeText(payload).catch(() => {
-    /* clipboard unavailable */
-  });
+  // Best-effort clipboard write. Routes through the Tauri clipboard plugin
+  // when running under the desktop webview (where `navigator.clipboard` is
+  // restricted on a non-editable canvas), or the standard browser API
+  // otherwise.
+  void writeClipboardText(payload);
   return true;
 }
 
@@ -426,14 +446,7 @@ async function asyncCanvasPaste(
   canvas: HTMLCanvasElement,
 ) {
   if (recentlyPasted()) return;
-  let text = "";
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    // Permission denied or insecure context. The paste event listener may
-    // still fire and pick this up; nothing more we can do here.
-    return;
-  }
+  const text = await readClipboardText();
 
   const env = tryDecode(text);
   if (env) {

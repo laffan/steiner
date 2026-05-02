@@ -1142,7 +1142,16 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    // Edit submenu: custom Undo/Redo + system Cut/Copy/Paste/SelectAll.
+    // Edit submenu: only custom Undo/Redo. The standard Cut/Copy/Paste
+    // predefined items have the same problem as the predefined undo/redo
+    // ones — their Cmd+X / C / V accelerators route through the system as
+    // `cut:` / `copy:` / `paste:` selectors and never reach our JS
+    // keydown handler. Leaving them out means the shortcut falls through
+    // to WKWebView's native key handling, which is exactly what we want:
+    // JS keydown handles canvas copy/paste, native handling covers
+    // input/textarea focus. Select All is omitted for the same reason —
+    // when canvas Select All is wanted it can be wired later as a custom
+    // menu item that emits an event.
     let undo = MenuItem::with_id(app, "menu:undo", "Undo", true, Some("CmdOrCtrl+Z"))?;
     let redo = MenuItem::with_id(
         app,
@@ -1151,23 +1160,11 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         true,
         Some("Shift+CmdOrCtrl+Z"),
     )?;
-    let cut = PredefinedMenuItem::cut(app, None)?;
-    let copy = PredefinedMenuItem::copy(app, None)?;
-    let paste = PredefinedMenuItem::paste(app, None)?;
-    let select_all = PredefinedMenuItem::select_all(app, None)?;
     let edit_submenu = Submenu::with_items(
         app,
         "Edit",
         true,
-        &[
-            &undo,
-            &redo,
-            &PredefinedMenuItem::separator(app)?,
-            &cut,
-            &copy,
-            &paste,
-            &select_all,
-        ],
+        &[&undo, &redo],
     )?;
 
     // Window submenu — minimize / fullscreen / close are useful on macOS.
@@ -1220,6 +1217,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState {
             current_stream: Mutex::new(None),
             #[cfg(desktop)]
