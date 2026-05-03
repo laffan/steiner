@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+import { resolve } from 'path'
 
 // `base: './'` keeps every asset URL relative so the same `dist/` works in
 // three contexts: Tauri's `tauri://` protocol, GitHub Pages under
@@ -18,6 +19,12 @@ export default defineConfig({
   build: {
     outDir: './dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        'oauth-callback': resolve(__dirname, 'oauth-callback.html'),
+      },
+    },
   },
   envPrefix: ['VITE_', 'TAURI_'],
 })

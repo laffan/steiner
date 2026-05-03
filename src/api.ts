@@ -218,7 +218,19 @@ const tauriBackend: ApiBackend = {
 
 export const api: ApiBackend = IS_TAURI ? tauriBackend : webBackend;
 
-export const DROPBOX_REDIRECT_URI = "steiner://auth/callback";
+/** Where Dropbox sends the user after they approve the app. We default to an
+ *  HTTPS bridge page (`oauth-callback.html`) hosted on GitHub Pages, which
+ *  JS-navigates to the `steiner://auth/callback` custom scheme. The bridge
+ *  is what makes the round-trip work on Android — Chrome there silently
+ *  drops a server-side 302 to a custom-scheme URL, but honours a
+ *  JS-initiated navigation following the user's "Allow" click. iOS and
+ *  desktop work with either. Override with `VITE_DROPBOX_REDIRECT_URI` in
+ *  `.env.local` for dev (e.g. `http://localhost:5174/oauth-callback.html`)
+ *  or for self-hosted Pages. The exact value here must also be added as a
+ *  redirect URI in your Dropbox app settings. */
+export const DROPBOX_REDIRECT_URI: string =
+  (import.meta.env?.VITE_DROPBOX_REDIRECT_URI as string | undefined) ||
+  "https://laffan.github.io/steiner/oauth-callback.html";
 
 /** Vite-injected build-time secrets. The user creates a Dropbox app and puts
  *  `VITE_DROPBOX_APP_KEY=…` in a local `.env` file. Web builds ignore this
