@@ -69,6 +69,10 @@ export type FlowConnectMode = "horizontal" | "closest";
 export interface FlowchartConfig<S extends FlowNode> {
   /** Returns the canvas-space bounds of the node. */
   getBounds: (node: S) => FlowBounds;
+  /** Footprint reserved for this node by `tidy`. Defaults to `getBounds`.
+   * Hosts can return a wider box (e.g. node + grouped items) so siblings
+   * don't overlap the attached items. The node still anchors via `getBounds`. */
+  getLayoutBounds?: (node: S) => FlowBounds;
   /** Predicate for which nodes can be flowable flowchart vertices. Defaults to all. */
   isFlowable?: (node: S) => boolean;
   /** Horizontal gap between parent's right edge and child's left edge. */
@@ -92,6 +96,7 @@ export interface FlowchartConfig<S extends FlowNode> {
 
 interface ResolvedConfig<S extends FlowNode> {
   getBounds: (node: S) => FlowBounds;
+  getLayoutBounds: (node: S) => FlowBounds;
   isFlowable: (node: S) => boolean;
   gapX: number;
   gapY: number;
@@ -110,6 +115,7 @@ export class FlowchartLayer<S extends FlowNode> {
   constructor(config: FlowchartConfig<S>) {
     this.cfg = {
       getBounds: config.getBounds,
+      getLayoutBounds: config.getLayoutBounds ?? config.getBounds,
       isFlowable: config.isFlowable ?? (() => true),
       gapX: config.gapX ?? 60,
       gapY: config.gapY ?? 16,
@@ -366,13 +372,18 @@ export class FlowchartLayer<S extends FlowNode> {
       const node = byId.get(id);
       if (!node) return { width: 0, height: 0 };
       const nb = this.cfg.getBounds(node);
-      const nw = nb.maxX - nb.minX;
-      const nh = nb.maxY - nb.minY;
+      const lb = this.cfg.getLayoutBounds(node);
+      const lw = lb.maxX - lb.minX;
+      const lh = lb.maxY - lb.minY;
+      // Node's offset within its layout box — non-zero when group-mates
+      // extend past the node's own bounds.
+      const offX = nb.minX - lb.minX;
+      const offY = nb.minY - lb.minY;
 
       const childIds = this.childrenOf(id).filter((c) => byId.has(c) && !visited.has(c));
       if (childIds.length === 0) {
-        out.set(id, { minX: 0, minY: 0 });
-        return { width: nw, height: nh };
+        out.set(id, { minX: offX, minY: offY });
+        return { width: lw, height: lh };
       }
 
       const childSizes: { id: string; width: number; height: number }[] = [];
@@ -392,15 +403,16 @@ export class FlowchartLayer<S extends FlowNode> {
         if (c.width > maxChildW) maxChildW = c.width;
       }
 
-      const subtreeH = Math.max(nh, stackedH);
-      const subtreeW = nw + gapX + maxChildW;
+      const subtreeH = Math.max(lh, stackedH);
+      const subtreeW = lw + gapX + maxChildW;
 
-      // Place this node at left edge, centered vertically within the subtree.
-      out.set(id, { minX: 0, minY: (subtreeH - nh) / 2 });
+      // Place this node's layout box at left edge, centered vertically within
+      // the subtree. The node itself sits at its offset inside that box.
+      out.set(id, { minX: offX, minY: (subtreeH - lh) / 2 + offY });
 
       // Place each child subtree to the right and stack them vertically,
       // centered against the subtree's vertical span.
-      const childOffsetX = nw + gapX;
+      const childOffsetX = lw + gapX;
       let cursorY = (subtreeH - stackedH) / 2;
       for (const ch of childSizes) {
         shiftSubtree(ch.id, childOffsetX, cursorY);
